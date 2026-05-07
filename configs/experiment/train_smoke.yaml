@@ -1,0 +1,28 @@
+# @package _global_
+
+# Minimal train path for shape/autograd checks. Pass
+# `training.dataloader.manifest_path=/path/to/manifest.txt` at runtime.
+lm_name: esm2_8M
+dtype: fp32
+use_deepspeed_evo_attention: false
+
+structure_encoder:
+  use_structure_encoder: false
+
+should_structure_encode_x0: false
+should_seq_struct_encode_after_pairformer: false
+
+model:
+  N_cycle: 1
+  pairformer:
+    n_blocks: 1
+  diffusion_module:
+    atom_encoder:
+      n_blocks: 1
+    transformer:
+      n_blocks: 1
+    atom_decoder:
+      n_blocks: 1
+
+training:
+  max_steps: 1

@@ -9,8 +9,8 @@ defaults:
   - structure_encoder: default
   - sequence_sampling_strategy: default
   - training: default
-  - experiment: null
   - effort: max
+  - experiment: null
   - _self_
 
 load_checkpoint_path: null
@@ -26,4 +26,3 @@ inference_ref_pos_augment: ${task_manager.ref_pos_augment}
 inference_loop_strategy_name: BasicInferenceLoopStrategy
 
 eval_version: unconditional
-

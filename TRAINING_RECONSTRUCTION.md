@@ -240,6 +240,27 @@ remasking, and all losses still need careful implementation.
      structure atom decoder, and structure encoder, but not DPLM.
    - Overfit one or two tiny examples to catch masking and shape errors.
 
+## Current Smoke Path
+
+Preprocess one or more local structures into cropped training examples:
+
+```bash
+uv run python -m disco.training.preprocess \
+  --input output/pdbs/length_70_sample_0.pdb \
+  --output-dir /tmp/disco_train_examples \
+  --manifest /tmp/disco_train_manifest.txt \
+  --crop-size 384
+```
+
+Run a one-step CPU smoke check with a small PLM and disabled structure encoder:
+
+```bash
+CUDA_VISIBLE_DEVICES= uv run python runner/train.py \
+  experiment=train_smoke \
+  logger=csv \
+  training.dataloader.manifest_path=/tmp/disco_train_manifest.txt
+```
+
 ## Main Risk
 
 The biggest reconstruction risk is not the neural network call graph. That is
