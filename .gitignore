@@ -115,3 +115,6 @@ disco/model/layer_norm/.ninja_log
 disco/model/layer_norm/build.ninja
 disco/model/layer_norm/layer_norm_cuda.o
 disco/model/layer_norm/layer_norm_cuda_kernel.cuda.o
+
+# Paper (reverse engineering)
+paper.md
