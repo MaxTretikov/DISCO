@@ -75,19 +75,27 @@ class TrainRunner:
     def __init__(self, configs: Any) -> None:
         self.configs = configs
         self.init_env()
+        self.init_dataloader()
         self.init_model()
         self.init_optimizer()
         self.load_checkpoint_if_requested()
-        self.init_dataloader()
 
     def init_env(self) -> None:
-        self.fabric = Fabric(
-            strategy=DDPStrategy(find_unused_parameters=False),
-            num_nodes=self.configs.fabric.num_nodes,
-            loggers=[
+        strategy_name = self.configs.fabric.get("strategy", "auto")
+        fabric_kwargs = {
+            "num_nodes": self.configs.fabric.num_nodes,
+            "loggers": [
                 hydra.utils.instantiate(logger_cfg)
                 for _, logger_cfg in self.configs.logger.items()
             ],
+        }
+        if strategy_name == "ddp":
+            fabric_kwargs["strategy"] = DDPStrategy(find_unused_parameters=False)
+        elif strategy_name != "auto":
+            fabric_kwargs["strategy"] = strategy_name
+
+        self.fabric = Fabric(
+            **fabric_kwargs,
         )
         self.fabric.launch()
         self.device = self.fabric.device
