@@ -24,7 +24,7 @@ from disco.training.losses import (
     smooth_lddt_loss,
     weighted_aligned_mse_loss,
 )
-from disco.training.noising import make_noised_batch
+from disco.training.noising import make_noised_batch, remask_masked_reference_features
 
 
 def _require(batch: dict, key: str):
@@ -101,6 +101,10 @@ def compute_training_loss(
 
     feature_dict = dict(feature_dict)
     feature_dict["masked_prot_restype"] = noised.xt_seq
+    feature_dict = remask_masked_reference_features(
+        feature_dict,
+        sequence_mask=noised.sequence_mask,
+    )
 
     s_inputs, s, z, s_skip, z_skip, _, encoding_dict = model.get_pairformer_output(
         feature_dict,
@@ -179,4 +183,3 @@ def compute_training_loss(
         }
     )
     return losses.total, log_dict
-

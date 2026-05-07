@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 import torch
 
+from disco.data.ccd import MASK_REF_CHARGE, MASK_REF_MASK, MASK_REF_POS
 from disco.data.constants import MASK_TOKEN_IDX
 
 
@@ -145,3 +146,106 @@ def make_noised_batch(
         sequence_mask=sequence_mask,
     )
 
+
+def _as_batched(tensor: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    if tensor.ndim == 1:
+        return tensor.unsqueeze(0), True
+    if tensor.ndim == 2 and tensor.shape[-1] == 3:
+        return tensor.unsqueeze(0), True
+    return tensor, False
+
+
+def _restore_batch(tensor: torch.Tensor, squeezed: bool) -> torch.Tensor:
+    return tensor.squeeze(0) if squeezed else tensor
+
+
+def remask_masked_reference_features(
+    feature_dict: dict[str, torch.Tensor],
+    sequence_mask: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Masks ref_pos/ref_charge/ref_mask for stochastically masked residues.
+
+    ``sequence_mask`` is indexed over protein residues only. The feature dict
+    carries token-level ``prot_residue_mask`` and atom-level ``atom_to_token_idx``
+    / ``atom_to_tokatom_idx``; together these let us map masked protein residues
+    back to their backbone atoms and replace the reference features with the
+    canonical masked-residue references used by ``TaskManager``.
+    """
+    required = [
+        "ref_pos",
+        "ref_charge",
+        "ref_mask",
+        "prot_residue_mask",
+        "atom_to_token_idx",
+        "atom_to_tokatom_idx",
+    ]
+    missing = [key for key in required if key not in feature_dict]
+    if missing:
+        raise KeyError(
+            "Cannot remask reference features; missing feature(s): "
+            + ", ".join(missing)
+        )
+
+    ref_pos, squeeze_ref_pos = _as_batched(feature_dict["ref_pos"])
+    ref_charge, squeeze_ref_charge = _as_batched(feature_dict["ref_charge"])
+    ref_mask, squeeze_ref_mask = _as_batched(feature_dict["ref_mask"])
+    prot_residue_mask, _ = _as_batched(feature_dict["prot_residue_mask"])
+    atom_to_token_idx, _ = _as_batched(feature_dict["atom_to_token_idx"])
+    atom_to_tokatom_idx, _ = _as_batched(feature_dict["atom_to_tokatom_idx"])
+
+    if sequence_mask.ndim == 1:
+        sequence_mask = sequence_mask.unsqueeze(0)
+    sequence_mask = sequence_mask.to(device=ref_pos.device, dtype=torch.bool)
+
+    batch_size, n_token = prot_residue_mask.shape
+    full_token_mask = torch.zeros(
+        (batch_size, n_token),
+        device=ref_pos.device,
+        dtype=torch.bool,
+    )
+    for batch_idx in range(batch_size):
+        prot_token_idx = torch.nonzero(
+            prot_residue_mask[batch_idx].to(dtype=torch.bool),
+            as_tuple=False,
+        ).squeeze(-1)
+        if sequence_mask.shape[-1] != prot_token_idx.shape[-1]:
+            raise ValueError(
+                "sequence_mask length must equal the number of protein tokens: "
+                f"{sequence_mask.shape[-1]} != {prot_token_idx.shape[-1]}"
+            )
+        full_token_mask[batch_idx, prot_token_idx] = sequence_mask[batch_idx]
+
+    batch_indices = torch.arange(batch_size, device=ref_pos.device)[:, None]
+    atom_token_mask = full_token_mask[batch_indices, atom_to_token_idx.long()]
+    backbone_atom_mask = (0 <= atom_to_tokatom_idx) & (atom_to_tokatom_idx < 4)
+    atom_mask = atom_token_mask & backbone_atom_mask.to(dtype=torch.bool)
+
+    mask_ref_pos = torch.as_tensor(
+        MASK_REF_POS,
+        device=ref_pos.device,
+        dtype=ref_pos.dtype,
+    )
+    mask_ref_charge = torch.as_tensor(
+        MASK_REF_CHARGE,
+        device=ref_charge.device,
+        dtype=ref_charge.dtype,
+    )
+    mask_ref_mask = torch.as_tensor(
+        MASK_REF_MASK,
+        device=ref_mask.device,
+        dtype=ref_mask.dtype,
+    )
+
+    replacement_idx = atom_to_tokatom_idx.long().clamp(min=0, max=3)
+    ref_pos = ref_pos.clone()
+    ref_charge = ref_charge.clone()
+    ref_mask = ref_mask.clone()
+    ref_pos[atom_mask] = mask_ref_pos[replacement_idx[atom_mask]]
+    ref_charge[atom_mask] = mask_ref_charge[replacement_idx[atom_mask]]
+    ref_mask[atom_mask] = mask_ref_mask[replacement_idx[atom_mask]]
+
+    feature_dict = dict(feature_dict)
+    feature_dict["ref_pos"] = _restore_batch(ref_pos, squeeze_ref_pos)
+    feature_dict["ref_charge"] = _restore_batch(ref_charge, squeeze_ref_charge)
+    feature_dict["ref_mask"] = _restore_batch(ref_mask, squeeze_ref_mask)
+    return feature_dict

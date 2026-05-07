@@ -37,6 +37,7 @@ _REQUIRED_FEATURES = (
     "token_index",
     "token_bonds",
     "atom_to_token_idx",
+    "atom_to_tokatom_idx",
     "prot_residue_mask",
     "distogram_rep_atom_mask",
 )
