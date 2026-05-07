@@ -14,12 +14,17 @@ from pathlib import Path
 from typing import Iterable
 
 import biotite.structure as struc
+import numpy as np
 import torch
 from biotite.structure import AtomArray, AtomArrayStack, BondList
 from biotite.structure.io import load_structure
 
 from disco.data.ccd import get_ccd_ref_info, get_mol_type
-from disco.data.constants import MASK_STD_RESIDUES, PRO_STD_RESIDUES, PRO_STD_RESIDUES_VALS_SET
+from disco.data.constants import (
+    MASK_STD_RESIDUES,
+    PRO_STD_RESIDUES,
+    PRO_STD_RESIDUES_VALS_SET,
+)
 from disco.data.featurizer import Featurizer
 from disco.data.parser import AddAtomArrayAnnot
 from disco.data.tokenizer import AtomArrayTokenizer
@@ -50,7 +55,10 @@ def _set_required_structure_annotations(atom_array: AtomArray) -> AtomArray:
         atom_array.set_annotation("chain_id", ["A"] * len(atom_array))
 
     chain_ids = atom_array.chain_id.astype(str)
-    chain_to_entity = {chain_id: str(i + 1) for i, chain_id in enumerate(dict.fromkeys(chain_ids))}
+    chain_to_entity = {
+        chain_id: str(i + 1)
+        for i, chain_id in enumerate(dict.fromkeys(chain_ids))
+    }
     entity_ids = [chain_to_entity[chain_id] for chain_id in chain_ids]
 
     atom_array.set_annotation("label_entity_id", entity_ids)
@@ -123,7 +131,10 @@ def _filter_supported_atoms(atom_array: AtomArray) -> AtomArray:
     return atom_array[keep]
 
 
-def prepare_training_atom_array(path: str | Path, bb_only: bool = True) -> tuple[AtomArray, dict[str, str]]:
+def prepare_training_atom_array(
+    path: str | Path,
+    bb_only: bool = True,
+) -> tuple[AtomArray, dict[str, str]]:
     """Loads a structure file and adds DISCO feature annotations."""
     atom_array = _load_atom_array(Path(path))
     atom_array = _set_required_structure_annotations(atom_array)
@@ -146,6 +157,49 @@ def prepare_training_atom_array(path: str | Path, bb_only: bool = True) -> tuple
     return atom_array, entity_poly_type
 
 
+def crop_atom_array_by_tokens(
+    atom_array: AtomArray,
+    max_tokens: int | None = 384,
+    *,
+    seed: int | None = None,
+    start: int | None = None,
+) -> AtomArray:
+    """Crops an annotated structure to a contiguous token window.
+
+    Standard polymer residues are kept whole because they are single DISCO
+    tokens. Ligands and non-standard residues are atom-level tokens, matching
+    the tokenizer used by the model features.
+    """
+    if max_tokens is None:
+        return atom_array
+    if max_tokens <= 0:
+        raise ValueError("max_tokens must be positive or None.")
+
+    token_array = AtomArrayTokenizer(atom_array).get_token_array()
+    if len(token_array) <= max_tokens:
+        return atom_array
+
+    max_start = len(token_array) - max_tokens
+    if start is None:
+        if seed is None:
+            start = 0
+        else:
+            rng = np.random.default_rng(seed)
+            start = int(rng.integers(0, max_start + 1))
+
+    if start < 0 or start > max_start:
+        raise ValueError(
+            f"Crop start {start} is invalid for {len(token_array)} tokens "
+            f"and crop size {max_tokens}."
+        )
+
+    selected_tokens = token_array[start : start + max_tokens]
+    atom_indices = [
+        atom_index for token in selected_tokens for atom_index in token.atom_indices
+    ]
+    return atom_array[atom_indices]
+
+
 def atom_array_to_training_example(atom_array: AtomArray) -> dict:
     """Converts an annotated AtomArray to one manifest-backed training example."""
     token_array = AtomArrayTokenizer(atom_array).get_token_array()
@@ -163,7 +217,8 @@ def atom_array_to_training_example(atom_array: AtomArray) -> dict:
         [
             token.value
             for token in token_array
-            if token.value in PRO_STD_RESIDUES_VALS_SET and token.value in valid_residues.values()
+            if token.value in PRO_STD_RESIDUES_VALS_SET
+            and token.value in valid_residues.values()
         ],
         dtype=torch.long,
     )
@@ -189,9 +244,18 @@ def preprocess_structure_file(
     input_path: str | Path,
     output_path: str | Path,
     bb_only: bool = True,
+    crop_size: int | None = 384,
+    crop_seed: int | None = None,
+    crop_start: int | None = None,
 ) -> Path:
     """Writes one preprocessed `.pt` training example."""
     atom_array, _ = prepare_training_atom_array(input_path, bb_only=bb_only)
+    atom_array = crop_atom_array_by_tokens(
+        atom_array,
+        max_tokens=crop_size,
+        seed=crop_seed,
+        start=crop_start,
+    )
     example = atom_array_to_training_example(atom_array)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,6 +276,8 @@ def preprocess_to_manifest(
     output_dir: str | Path,
     manifest_path: str | Path,
     bb_only: bool = True,
+    crop_size: int | None = 384,
+    crop_seed: int | None = None,
 ) -> Path:
     """Preprocesses structures and writes a relative-path manifest."""
     input_paths = _expand_inputs(inputs, input_globs)
@@ -224,12 +290,25 @@ def preprocess_to_manifest(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     output_paths = []
-    for input_path in input_paths:
+    for index, input_path in enumerate(input_paths):
         output_path = output_dir / f"{input_path.stem}.pt"
-        output_paths.append(preprocess_structure_file(input_path, output_path, bb_only=bb_only))
+        per_file_seed = None if crop_seed is None else crop_seed + index
+        output_paths.append(
+            preprocess_structure_file(
+                input_path,
+                output_path,
+                bb_only=bb_only,
+                crop_size=crop_size,
+                crop_seed=per_file_seed,
+            )
+        )
 
     manifest_lines = [
-        str(path.relative_to(manifest_path.parent) if path.is_relative_to(manifest_path.parent) else path)
+        str(
+            path.relative_to(manifest_path.parent)
+            if path.is_relative_to(manifest_path.parent)
+            else path
+        )
         for path in output_paths
     ]
     manifest_path.write_text("\n".join(manifest_lines) + "\n")
@@ -242,15 +321,34 @@ def main() -> None:
     parser.add_argument("--input-glob", nargs="*", default=[], help="Glob(s) for input files.")
     parser.add_argument("--output-dir", required=True, help="Directory for `.pt` examples.")
     parser.add_argument("--manifest", required=True, help="Output manifest path.")
-    parser.add_argument("--all-atom-distogram", action="store_true", help="Use non-backbone distogram representatives where available.")
+    parser.add_argument(
+        "--all-atom-distogram",
+        action="store_true",
+        help="Use non-backbone distogram representatives where available.",
+    )
+    parser.add_argument(
+        "--crop-size",
+        type=int,
+        default=384,
+        help="Maximum tokens per example. Use 0 to disable cropping.",
+    )
+    parser.add_argument(
+        "--crop-seed",
+        type=int,
+        default=None,
+        help="Seed for random contiguous crops. Defaults to the first crop window.",
+    )
     args = parser.parse_args()
 
+    crop_size = None if args.crop_size <= 0 else args.crop_size
     manifest = preprocess_to_manifest(
         inputs=args.input,
         input_globs=args.input_glob,
         output_dir=args.output_dir,
         manifest_path=args.manifest,
         bb_only=not args.all_atom_distogram,
+        crop_size=crop_size,
+        crop_seed=args.crop_seed,
     )
     print(manifest)
 
