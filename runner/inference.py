@@ -107,7 +107,7 @@ class InferenceRunner:
         self.fabric.launch()
         self.device = self.fabric.device
         torch.cuda.set_device(self.device)
-        os.environ["TORCH_CUDA_ARCH_LIST"] = "8.0,8.9"
+        os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.9")
         if self.configs.use_deepspeed_evo_attention:
             env = os.getenv("CUTLASS_PATH", None)
             self.print(f"env: {env}")
@@ -190,21 +190,76 @@ class InferenceRunner:
 
         current = self.model.state_dict()
         filtered = OrderedDict()
+        skipped_keys = []
+
+        def is_generated_rotary_buffer(key: str) -> bool:
+            return key.endswith("rotary_embeddings.inv_freq")
 
         for k, v in checkpoint["model"].items():
             if k in current and v.shape == current[k].shape:
                 filtered[k] = v  # → OK: same name & same shape
             else:
+                skipped_keys.append(k)
                 print(
                     f"Skipping '{k}': not found or shape changed "
                     f"(saved {tuple(v.shape)} → current "
                     f"{tuple(current.get(k, torch.empty(0)).shape)})"
                 )
 
-        self.model.load_state_dict(
+        incompatible_keys = self.model.load_state_dict(
             state_dict=filtered,
-            strict=self.configs.load_strict,
+            strict=False,
         )
+        missing_keys = list(incompatible_keys.missing_keys)
+        unexpected_keys = list(incompatible_keys.unexpected_keys)
+
+        ignored_missing = [
+            key for key in missing_keys if is_generated_rotary_buffer(key)
+        ]
+        ignored_skipped = [
+            key for key in skipped_keys if is_generated_rotary_buffer(key)
+        ]
+        if ignored_missing or ignored_skipped:
+            self.print(
+                "Ignoring generated rotary embedding buffers while loading "
+                "checkpoint: "
+                f"{len(ignored_missing)} missing, {len(ignored_skipped)} skipped."
+            )
+
+        if self.configs.load_strict:
+            missing_keys = [
+                key for key in missing_keys if not is_generated_rotary_buffer(key)
+            ]
+            unexpected_keys = [
+                key for key in unexpected_keys if not is_generated_rotary_buffer(key)
+            ]
+            skipped_keys = [
+                key for key in skipped_keys if not is_generated_rotary_buffer(key)
+            ]
+            error_msgs = []
+            if missing_keys:
+                error_msgs.append(
+                    "Missing key(s) in state_dict: "
+                    + ", ".join(f'"{key}"' for key in missing_keys)
+                    + "."
+                )
+            if unexpected_keys:
+                error_msgs.append(
+                    "Unexpected key(s) in state_dict: "
+                    + ", ".join(f'"{key}"' for key in unexpected_keys)
+                    + "."
+                )
+            if skipped_keys:
+                error_msgs.append(
+                    "Skipped incompatible checkpoint key(s): "
+                    + ", ".join(f'"{key}"' for key in skipped_keys)
+                    + "."
+                )
+            if error_msgs:
+                raise RuntimeError(
+                    "Error(s) in loading state_dict for DISCO:\n\t"
+                    + "\n\t".join(error_msgs)
+                )
 
         self.model.eval()
         self.print("Finish loading checkpoint.")
