@@ -159,14 +159,21 @@ class TrainRunner:
         if checkpoint_path is None:
             return
 
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=self.device,
+            weights_only=False,
+        )
         model_state = checkpoint.get("model", checkpoint)
         sample_key = next(iter(model_state.keys()))
         if sample_key.startswith("module."):
             model_state = OrderedDict(
                 (key[len("module.") :], value) for key, value in model_state.items()
             )
-        self.model.load_state_dict(model_state, strict=self.configs.load_strict)
+        self.unwrap_model().load_state_dict(
+            model_state,
+            strict=self.configs.load_strict,
+        )
 
         if "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
@@ -174,12 +181,18 @@ class TrainRunner:
             self.ema.load_state_dict(checkpoint["ema"])
         self.start_step = int(checkpoint.get("step", 0))
 
+    def unwrap_model(self) -> torch.nn.Module:
+        model = self.model
+        while hasattr(model, "module"):
+            model = model.module
+        return model
+
     def save_checkpoint(self, step: int) -> None:
         ckpt_dir = Path(self.configs.training.checkpoint_dir)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         checkpoint = {
             "step": step,
-            "model": self.fabric.unwrap(self.model).state_dict(),
+            "model": self.unwrap_model().state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "ema": self.ema.state_dict(),
             "configs": OmegaConf.to_container(self.configs, resolve=True),
