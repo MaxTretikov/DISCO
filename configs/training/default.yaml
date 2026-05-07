@@ -5,7 +5,15 @@ training:
   save_every_n_steps: 1000
   checkpoint_dir: ${paths.run_dir}/checkpoints
   resume_checkpoint_path: null
-  dataloader: null
+  dataloader:
+    _target_: disco.training.data.create_preprocessed_dataloader
+    manifest_path: null
+    batch_size: 1
+    shuffle: true
+    num_workers: 0
+    drop_last: false
+    pin_memory: true
+    validate: true
   sequence_conditioning_mode: scheduler
   gradient_clip_norm: 10.0
   ema_decay: 0.999
