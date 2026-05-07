@@ -233,9 +233,6 @@ class HFBertModel(torch.nn.Module):
         )
 
         lm_logits = result["logits"][:, 1:-1]
-        if lm_logits.shape[0] == 1:
-            lm_logits = lm_logits.squeeze()
-
         return single_repns, pair_repns, lm_logits
 
 
@@ -361,9 +358,7 @@ class LMWrapper(nn.Module):
         pair = self.final_layer(pair_rep)
         single = self.final_layer_single_rep(single_rep)
 
-        squeeze_cond = z.ndim <= 3 or (
-            z.ndim == 4 and single.ndim == 3 and single.shape[0] == 1
-        )
+        squeeze_cond = z.ndim <= 3 or prot_residue_mask.ndim == 1
 
         if squeeze_cond:
             pair = pair.squeeze()
@@ -373,7 +368,9 @@ class LMWrapper(nn.Module):
         if single.ndim == 3:
             to_add = single.flatten(0, 1)
 
-        s_inputs[prot_residue_mask] = s_inputs[prot_residue_mask] + to_add
+        s_add = torch.zeros_like(s_inputs)
+        s_add[prot_residue_mask] = to_add
+        s_inputs = s_inputs + s_add
 
         newmat_paired = None
         if prot_residue_mask.ndim == 1:
@@ -448,11 +445,15 @@ def add_matrix_subset(z, prot_mask, pair):
 
     def _inner_subset(inner_z):
         # Add the corresponding pair values to the subset of z
+        inner_z = inner_z.clone()
         try:
             if pair.ndim == 1:
-                inner_z[row_idx, col_idx] += pair
+                inner_z[row_idx, col_idx] = inner_z[row_idx, col_idx] + pair
             else:
-                inner_z[row_idx, col_idx] += pair[: len(mask_index), : len(mask_index)]
+                inner_z[row_idx, col_idx] = (
+                    inner_z[row_idx, col_idx]
+                    + pair[: len(mask_index), : len(mask_index)]
+                )
         except ValueError as e:
             logger.error(
                 f"mismatch index len z_indices:{row_idx}, {col_idx}, z:{z.shape} and pair, with mask index {len(mask_index)}"

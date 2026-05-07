@@ -279,12 +279,17 @@ class DISCO(nn.Module):
         if len(xt_seq) == 1 and logits.ndim == 3 and len(logits) > 1:
             xt_seq = xt_seq.repeat(len(logits), 1)
 
-        unmasked_indices = xt_seq != MASK_TOKEN_IDX
-        logits = logits.squeeze()
+        while xt_seq.ndim < logits.ndim - 1:
+            xt_seq = xt_seq.unsqueeze(0)
+        if xt_seq.shape != logits.shape[:-1]:
+            xt_seq = xt_seq.expand(logits.shape[:-1])
 
         if enforce_unmask_stay:
-            logits[unmasked_indices] = _NEG_INFINITY
-            logits[unmasked_indices, xt_seq[unmasked_indices]] = 0
+            unmasked_indices = xt_seq != MASK_TOKEN_IDX
+            current_tokens = xt_seq.clamp(min=0, max=logits.shape[-1] - 1)
+            stay_logits = torch.full_like(logits, _NEG_INFINITY)
+            stay_logits.scatter_(-1, current_tokens.unsqueeze(-1), 0)
+            logits = torch.where(unmasked_indices.unsqueeze(-1), stay_logits, logits)
 
         return logits
 
@@ -355,8 +360,9 @@ class DISCO(nn.Module):
             "token_index": 1,
             "token_bonds": 1,
         }
+        device = next(self.parameters()).device
         for key, __ in input_feature.items():
-            input_feature_dict[key] = input_feature_dict[key].to("cuda")
+            input_feature_dict[key] = input_feature_dict[key].to(device)
 
         N_token = input_feature_dict["residue_index"].shape[-1]
         if N_token <= 16:
@@ -369,7 +375,6 @@ class DISCO(nn.Module):
         s_inputs = self.input_embedder(
             input_feature_dict, inplace_safe=False, chunk_size=chunk_size
         )  # [..., N_token, 451]
-        input_feature_dict["token_bonds"] = input_feature_dict["token_bonds"].to("cuda")
         s_init = self.linear_no_bias_sinit(s_inputs)  # [..., N_token, c_s]
         z_init = (
             self.linear_no_bias_zinit1(s_init)[..., None, :]
