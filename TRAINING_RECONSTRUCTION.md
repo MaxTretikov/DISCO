@@ -252,13 +252,31 @@ uv run python -m disco.training.preprocess \
   --crop-size 384
 ```
 
+Process the downloaded raw PDB archive with the paper reconstruction settings:
+
+```bash
+uv run python -m disco.training.pdb_dataset \
+  --archive-root /mnt/archive/datasets/disco_training \
+  --output-dir /mnt/archive/datasets/disco_training/processed/examples \
+  --manifest /mnt/archive/datasets/disco_training/processed/manifest.jsonl \
+  --metadata /mnt/archive/datasets/disco_training/processed/metadata.jsonl \
+  --crop-size 384 \
+  --samples-per-entry 1
+```
+
+This uses the paper weights for chain/interface samples, the 2021-09-30 cutoff,
+and 20/40/40 contiguous/spatial/interface crops. If Protenix cluster files are
+available, pass them with `--cluster-file`; otherwise the processor falls back
+to identical-sequence clusters from `pdb_seqres.txt.gz`.
+
 Run a one-step CPU smoke check with a small PLM and disabled structure encoder:
 
 ```bash
 CUDA_VISIBLE_DEVICES= uv run python runner/train.py \
   experiment=train_smoke \
   logger=csv \
-  training.dataloader.manifest_path=/tmp/disco_train_manifest.txt
+  training.dataloader.manifest_path=/tmp/disco_train_manifest.txt \
+  training.dataloader.weighted_sampling=true
 ```
 
 ## Main Risk

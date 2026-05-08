@@ -576,7 +576,7 @@ class AddAtomArrayAnnot:
             if atom.mol_type == "ligand" or atom_name_position is None:
                 tokatom_idx = 0
             else:
-                tokatom_idx = atom_name_position[atom.atom_name]
+                tokatom_idx = atom_name_position.get(atom.atom_name, 0)
             tokatom_idx_list.append(tokatom_idx)
         atom_array.set_annotation("tokatom_idx", tokatom_idx_list)
         return atom_array
@@ -743,7 +743,12 @@ class AddAtomArrayAnnot:
 
             else:
                 atom_map, coord, charge, mask = ref_result
-                atom_sub_idx = atom_map[atom.atom_name]
+                atom_sub_idx = atom_map.get(atom.atom_name)
+                if atom_sub_idx is None:
+                    ref_mask.append(0)
+                    ref_pos.append([0.0, 0.0, 0.0])
+                    ref_charge.append(0)
+                    continue
                 ref_mask.append(mask[atom_sub_idx])
                 ref_pos.append(coord[atom_sub_idx])
                 ref_charge.append(charge[atom_sub_idx])

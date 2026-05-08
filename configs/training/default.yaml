@@ -14,6 +14,7 @@ training:
     drop_last: false
     pin_memory: true
     validate: true
+    weighted_sampling: false
   sequence_conditioning_mode: scheduler
   gradient_clip_norm: 10.0
   ema_decay: 0.999

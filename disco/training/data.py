@@ -43,7 +43,7 @@ _REQUIRED_FEATURES = (
 )
 
 
-def _read_manifest(manifest_path: Path) -> list[Path]:
+def _read_manifest_records(manifest_path: Path) -> list[dict[str, Any]]:
     if not manifest_path.exists():
         raise FileNotFoundError(f"Training manifest does not exist: {manifest_path}")
 
@@ -51,25 +51,31 @@ def _read_manifest(manifest_path: Path) -> list[Path]:
         raw = json.loads(manifest_path.read_text())
         if not isinstance(raw, list):
             raise ValueError("JSON training manifest must be a list of paths or objects.")
-        entries = [item["path"] if isinstance(item, dict) else item for item in raw]
+        records = [item if isinstance(item, dict) else {"path": item} for item in raw]
     elif manifest_path.suffix == ".jsonl":
-        entries = []
+        records = []
         for line in manifest_path.read_text().splitlines():
             line = line.strip()
             if not line:
                 continue
             item = json.loads(line)
-            entries.append(item["path"] if isinstance(item, dict) else item)
+            records.append(item if isinstance(item, dict) else {"path": item})
     else:
-        entries = [
-            line.strip()
+        records = [
+            {"path": line.strip()}
             for line in manifest_path.read_text().splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
 
     base_dir = manifest_path.parent
-    paths = [Path(entry) for entry in entries]
-    return [path if path.is_absolute() else base_dir / path for path in paths]
+    for record in records:
+        path = Path(record["path"])
+        record["path"] = path if path.is_absolute() else base_dir / path
+    return records
+
+
+def _read_manifest(manifest_path: Path) -> list[Path]:
+    return [record["path"] for record in _read_manifest_records(manifest_path)]
 
 
 def _get_label(example: Mapping[str, Any], key: str):
@@ -165,10 +171,15 @@ class PreprocessedTrainingDataset(Dataset):
 
     def __init__(self, manifest_path: str | Path, validate: bool = True) -> None:
         self.manifest_path = Path(manifest_path)
-        self.paths = _read_manifest(self.manifest_path)
+        self.records = _read_manifest_records(self.manifest_path)
+        self.paths = [record["path"] for record in self.records]
         if len(self.paths) == 0:
             raise ValueError(f"Training manifest is empty: {self.manifest_path}")
         self.validate = validate
+        self.sampling_weights = torch.tensor(
+            [float(record.get("weight", 1.0)) for record in self.records],
+            dtype=torch.double,
+        ).clamp_min(0.0)
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -192,6 +203,7 @@ def create_preprocessed_dataloader(
     drop_last: bool = False,
     pin_memory: bool = True,
     validate: bool = True,
+    weighted_sampling: bool = False,
 ) -> DataLoader:
     """Creates a dataloader for manifest-listed preprocessed examples."""
     if manifest_path is None:
@@ -201,10 +213,22 @@ def create_preprocessed_dataloader(
         )
 
     dataset = PreprocessedTrainingDataset(manifest_path=manifest_path, validate=validate)
+    sampler = None
+    if weighted_sampling:
+        if dataset.sampling_weights.sum() <= 0:
+            raise ValueError("Cannot use weighted sampling with all-zero manifest weights.")
+        sampler = torch.utils.data.WeightedRandomSampler(
+            weights=dataset.sampling_weights,
+            num_samples=len(dataset),
+            replacement=True,
+        )
+        shuffle = False
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         drop_last=drop_last,
         pin_memory=pin_memory,

@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import argparse
 import glob
+import gzip
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -43,6 +46,16 @@ def _first_model(atom_array: AtomArray | AtomArrayStack) -> AtomArray:
 
 
 def _load_atom_array(path: Path) -> AtomArray:
+    if path.suffix == ".gz":
+        inner_suffix = Path(path.stem).suffix
+        if inner_suffix.startswith(".pdb"):
+            inner_suffix = ".pdb"
+        with gzip.open(path, "rb") as src:
+            with tempfile.NamedTemporaryFile(suffix=inner_suffix) as tmp:
+                shutil.copyfileobj(src, tmp)
+                tmp.flush()
+                return _load_atom_array(Path(tmp.name))
+
     try:
         atom_array = load_structure(str(path), extra_fields=["occupancy", "b_factor"])
     except TypeError:
