@@ -535,30 +535,34 @@ class DISCO(nn.Module):
         N_token = input_feature_dict["residue_index"].shape[-1]
         if out.shape[-2] != N_token:
             prot_res_mask = input_feature_dict["prot_residue_mask"]
+            token_index = input_feature_dict["token_index"].to(device=out.device)
+            prot_res_mask = prot_res_mask.to(device=out.device, dtype=torch.bool)
 
-            token_idx = input_feature_dict["token_index"][prot_res_mask]
-            if prot_res_mask.ndim == 2:
-                token_idx = token_idx.reshape(len(prot_res_mask), -1)
-
-            add_idx = token_idx.unsqueeze(-1).repeat(
-                *[1 for _ in range(token_idx.ndim)], out.shape[-1]
-            )
-
-            expanded_tnsr_dims, scatter_dim = [], 0
-            # If we have a batch size, include that in the expanded tensor dims
-            if out.ndim == 3:
-                if out.ndim != add_idx.ndim:
-                    add_idx = add_idx.unsqueeze(0).repeat(out.shape[0], 1, 1)
-
-                expanded_tnsr_dims.append(out.shape[0])
-                scatter_dim = 1
-
-            expanded_tnsr_dims.extend([N_token, out.shape[-1]])
-
-            out_pre = torch.zeros(tuple(expanded_tnsr_dims), device=out.device)
-            out = torch.scatter_add(
-                input=out_pre, dim=scatter_dim, index=add_idx, src=out
-            )
+            if out.ndim == 3 and prot_res_mask.ndim == 2:
+                out_pre = out.new_zeros((out.shape[0], N_token, out.shape[-1]))
+                for batch_idx in range(out.shape[0]):
+                    token_idx = token_index[batch_idx][prot_res_mask[batch_idx]].long()
+                    n = min(token_idx.shape[0], out.shape[1])
+                    if n == 0:
+                        continue
+                    add_idx = token_idx[:n, None].expand(n, out.shape[-1])
+                    out_pre[batch_idx].scatter_add_(
+                        dim=0,
+                        index=add_idx,
+                        src=out[batch_idx, :n],
+                    )
+                out = out_pre
+            else:
+                token_idx = token_index[prot_res_mask].long()
+                n = min(token_idx.shape[0], out.shape[-2])
+                out_pre = out.new_zeros((*out.shape[:-2], N_token, out.shape[-1]))
+                add_idx = token_idx[:n, None].expand(n, out.shape[-1])
+                if out.ndim == 3:
+                    add_idx = add_idx.unsqueeze(0).expand(out.shape[0], n, out.shape[-1])
+                    out_pre.scatter_add_(dim=1, index=add_idx, src=out[:, :n])
+                else:
+                    out_pre.scatter_add_(dim=0, index=add_idx, src=out[:n])
+                out = out_pre
 
         # Need to write code to scatter for things like we did in old code
         return out
