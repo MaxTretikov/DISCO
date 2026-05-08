@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as functional
 
 
 @dataclass(frozen=True)
@@ -70,11 +70,11 @@ class BitLinear(nn.Module):
         eps: float = 1e-5,
     ) -> None:
         super().__init__()
-        if weight_bits not in {1, 1.0, 1.58}:
+        if weight_bits not in {1, 1.58}:
             raise ValueError("BitLinear supports weight_bits of 1 or 1.58.")
         self.in_features = in_features
         self.out_features = out_features
-        self.weight_bits = 1 if weight_bits in {1, 1.0} else 1.58
+        self.weight_bits = 1 if weight_bits == 1 else 1.58
         self.activation_bits = activation_bits
         self.quantize_activations = quantize_activations
         self.eps = eps
@@ -123,7 +123,7 @@ class BitLinear(nn.Module):
                 self.activation_bits,
                 self.eps,
             )
-        return F.linear(input_tensor, weight, self.bias)
+        return functional.linear(input_tensor, weight, self.bias)
 
     def extra_repr(self) -> str:
         return (

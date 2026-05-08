@@ -49,9 +49,7 @@ class WarmupStepDecay:
         decay_factor: float,
         decay_every_n_steps: int,
     ) -> None:
-        self.optimizers = (
-            list(optimizer) if isinstance(optimizer, Sequence) else [optimizer]
-        )
+        self.optimizers = list(optimizer) if isinstance(optimizer, Sequence) else [optimizer]
         self.base_lr = base_lr
         self.warmup_steps = warmup_steps
         self.decay_factor = decay_factor
@@ -116,9 +114,7 @@ class TrainRunner:
         self.validate_fp4_training_config()
         structure_encoder = None
         if self.configs.structure_encoder.use_structure_encoder:
-            structure_encoder = hydra.utils.instantiate(
-                self.configs.structure_encoder.args
-            )
+            structure_encoder = hydra.utils.instantiate(self.configs.structure_encoder.args)
 
         sequence_sampling_strategy = hydra.utils.instantiate(
             self.configs.sequence_sampling_strategy
@@ -330,13 +326,13 @@ class TrainRunner:
                     len(self.optimizers),
                 )
             else:
-                for optimizer, optimizer_state in zip(self.optimizers, optimizer_states):
+                for optimizer, optimizer_state in zip(
+                    self.optimizers, optimizer_states, strict=True
+                ):
                     optimizer.load_state_dict(optimizer_state)
         elif "optimizer" in checkpoint:
             if len(self.optimizers) != 1:
-                logger.warning(
-                    "Skipping legacy optimizer state load for multi-optimizer config."
-                )
+                logger.warning("Skipping legacy optimizer state load for multi-optimizer config.")
             else:
                 self.optimizer.load_state_dict(checkpoint["optimizer"])
         if "ema" in checkpoint:
@@ -439,9 +435,7 @@ class TrainRunner:
 
             if step % self.configs.training.log_every_n_steps == 0:
                 log_values = {
-                    key: float(
-                        (value / gradient_accumulation_steps).detach().float().cpu()
-                    )
+                    key: float((value / gradient_accumulation_steps).detach().float().cpu())
                     for key, value in accumulated_logs.items()
                 }
                 log_values["lr"] = lr
@@ -466,7 +460,10 @@ class TrainRunner:
 
 @hydra.main(config_path="../configs", config_name="train.yaml", version_base=None)
 def main(configs: DictConfig) -> None:
-    log_format = "%(asctime)s,%(msecs)-3d %(levelname)-8s [%(filename)s:%(lineno)s %(funcName)s] %(message)s"
+    log_format = (
+        "%(asctime)s,%(msecs)-3d %(levelname)-8s "
+        "[%(filename)s:%(lineno)s %(funcName)s] %(message)s"
+    )
     logging.basicConfig(
         format=log_format,
         level=logging.INFO,
