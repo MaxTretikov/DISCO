@@ -19,6 +19,13 @@ training:
   gradient_accumulation_steps: 1
   gradient_clip_norm: 10.0
   ema_decay: 0.999
+  compile:
+    enabled: false
+    target: pairformer
+    backend: inductor
+    mode: reduce-overhead
+    fullgraph: false
+    dynamic: false
   optimizer:
     name: adam
     lr: 0.00018
