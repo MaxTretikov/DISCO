@@ -380,6 +380,8 @@ class LMWrapper(nn.Module):
             logger.warning("LM logits not available")
         pair = self.final_layer(pair_rep)
         single = self.final_layer_single_rep(single_rep)
+        pair = pair.to(dtype=z.dtype)
+        single = single.to(dtype=s_inputs.dtype)
 
         squeeze_cond = z.ndim <= 3 or prot_residue_mask.ndim == 1
 

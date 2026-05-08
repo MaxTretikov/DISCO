@@ -60,32 +60,38 @@ def weighted_rigid_align(
     """Aligns target coordinates onto predicted coordinates with weighted Kabsch."""
     target = _ensure_batched_coords(target)
     pred = _ensure_batched_coords(pred)
-    weights = _ensure_batched_mask(weights, target.shape[0]).to(dtype=target.dtype)
+    output_dtype = target.dtype
 
-    weights_sum = weights.sum(dim=-1, keepdim=True).clamp_min(eps)
-    normalized = weights / weights_sum
+    with torch.autocast(device_type=target.device.type, enabled=False):
+        target = target.float()
+        pred = pred.float()
+        weights = _ensure_batched_mask(weights, target.shape[0]).to(dtype=target.dtype)
 
-    target_center = (target * normalized[..., None]).sum(dim=-2, keepdim=True)
-    pred_center = (pred * normalized[..., None]).sum(dim=-2, keepdim=True)
-    target_centered = target - target_center
-    pred_centered = pred - pred_center
+        weights_sum = weights.sum(dim=-1, keepdim=True).clamp_min(eps)
+        normalized = weights / weights_sum
 
-    covariance = torch.matmul(
-        (target_centered * weights[..., None]).transpose(-1, -2),
-        pred_centered,
-    )
-    u, _, vh = torch.linalg.svd(covariance.float())
-    rotation = torch.matmul(vh.transpose(-1, -2), u.transpose(-1, -2))
+        target_center = (target * normalized[..., None]).sum(dim=-2, keepdim=True)
+        pred_center = (pred * normalized[..., None]).sum(dim=-2, keepdim=True)
+        target_centered = target - target_center
+        pred_centered = pred - pred_center
 
-    det = torch.linalg.det(rotation)
-    correction = torch.ones((*rotation.shape[:-2], 3), device=rotation.device)
-    correction[..., -1] = torch.where(det < 0, -1.0, 1.0)
-    rotation = torch.matmul(
-        vh.transpose(-1, -2) * correction[..., None, :],
-        u.transpose(-1, -2),
-    ).to(dtype=target.dtype)
+        covariance = torch.matmul(
+            (target_centered * weights[..., None]).transpose(-1, -2),
+            pred_centered,
+        )
+        u, _, vh = torch.linalg.svd(covariance)
+        rotation = torch.matmul(vh.transpose(-1, -2), u.transpose(-1, -2))
 
-    return torch.matmul(target_centered, rotation) + pred_center
+        det = torch.linalg.det(rotation)
+        correction = torch.ones((*rotation.shape[:-2], 3), device=rotation.device)
+        correction[..., -1] = torch.where(det < 0, -1.0, 1.0)
+        rotation = torch.matmul(
+            vh.transpose(-1, -2) * correction[..., None, :],
+            u.transpose(-1, -2),
+        )
+        aligned = torch.matmul(target_centered, rotation) + pred_center
+
+    return aligned.to(dtype=output_dtype)
 
 
 def atom_weights_from_features(
@@ -120,12 +126,14 @@ def weighted_aligned_mse_loss(
     """Paper weighted aligned MSE, excluding unresolved atoms."""
     pred = _ensure_batched_coords(pred)
     target = _ensure_batched_coords(target)
-    coord_mask = _ensure_batched_mask(coord_mask, pred.shape[0]).to(dtype=pred.dtype)
-    atom_weights = _ensure_batched_mask(atom_weights, pred.shape[0]).to(dtype=pred.dtype)
+    coord_mask = _ensure_batched_mask(coord_mask, pred.shape[0]).to(dtype=torch.float32)
+    atom_weights = _ensure_batched_mask(atom_weights, pred.shape[0]).to(dtype=torch.float32)
 
     align_weights = atom_weights * coord_mask
-    aligned_target = weighted_rigid_align(target, pred.detach(), align_weights, eps=eps)
-    per_atom = ((pred - aligned_target) ** 2).sum(dim=-1) / 3.0
+    aligned_target = weighted_rigid_align(
+        target.float(), pred.detach().float(), align_weights, eps=eps
+    )
+    per_atom = ((pred.float() - aligned_target) ** 2).sum(dim=-1) / 3.0
     weighted = per_atom * atom_weights * coord_mask
     denom = (atom_weights * coord_mask).sum(dim=-1).clamp_min(eps)
     return (weighted.sum(dim=-1) / denom).mean()

@@ -401,7 +401,11 @@ class DISCO(nn.Module):
         # Line 7-13 recycling
         for cycle_no in range(N_cycle):
             z = z_init + self.linear_no_bias_z_cycle(self.layernorm_z_cycle(z))
-            if cycle_no > 0 and can_seq_struct_recycle:
+            if (
+                cycle_no > 0
+                and self.should_seq_struct_encode_after_pairformer
+                and can_seq_struct_recycle
+            ):
                 s, z, _ = self._update_reps_with_seq_struct_encode(
                     s_inputs=s_inputs,
                     s_trunk=s,
