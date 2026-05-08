@@ -118,7 +118,31 @@ class Transition(nn.Module):
         """Initializes the final output linear layer weights to zero."""
         nn.init.zeros_(self.linear_no_bias.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_chunked(self, x: torch.Tensor, chunk_size: int) -> torch.Tensor:
+        if chunk_size < 1:
+            raise ValueError("Transition chunk_size must be >= 1.")
+
+        other_dims = x.shape[:-1]
+        dim_size = x.shape[-1]
+        x = x.reshape(-1, dim_size)
+        outputs = torch.empty((x.shape[0], self.c_in), dtype=x.dtype, device=x.device)
+        start = 0
+        for chunk in x.split(chunk_size, dim=0):
+            y = self.layernorm1(chunk)
+            a = self.linear_no_bias_a(y)
+            a = F.silu(a, inplace=True)
+            b = self.linear_no_bias_b(y)
+            del y
+            b *= a
+            del a
+            output = self.linear_no_bias(b)
+            outputs[start : start + output.shape[0]] = output
+            start += output.shape[0]
+        return outputs.reshape(*other_dims, self.c_in)
+
+    def forward(
+        self, x: torch.Tensor, chunk_size: int | None = None
+    ) -> torch.Tensor:
         """
         Args:
             x (torch.Tensor): the input tensor
@@ -128,6 +152,9 @@ class Transition(nn.Module):
             torch.Tensor: the output tensor as the same shape of x
                 [..., c]
         """
+        if chunk_size is not None:
+            return self._forward_chunked(x, chunk_size)
+
         if self.training:
             x = self.layernorm1(x)
             a = self.linear_no_bias_a(x)
