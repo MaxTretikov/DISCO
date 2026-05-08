@@ -25,6 +25,7 @@ from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig, OmegaConf
 
 from disco.model.disco import DISCO
+from disco.training.bitnet import apply_bitnet_quantization
 from disco.training.ema import ModelEma
 from disco.training.step import compute_training_loss
 from disco.utils.seed import seed_everything
@@ -112,6 +113,7 @@ class TrainRunner:
             seed_everything(0, deterministic=True)
 
     def init_model(self) -> None:
+        self.validate_fp4_training_config()
         structure_encoder = None
         if self.configs.structure_encoder.use_structure_encoder:
             structure_encoder = hydra.utils.instantiate(
@@ -126,7 +128,7 @@ class TrainRunner:
             structure_encoder,
             sequence_sampling_strategy,
         )
-        self.validate_fp4_training_config()
+        self.apply_training_quantization()
 
     def validate_fp4_training_config(self) -> None:
         fp4_cfg = self.configs.training.get("fp4", None)
@@ -159,6 +161,19 @@ class TrainRunner:
         raise NotImplementedError(
             "FP4 module wrapping is not wired yet. The config gate is present so "
             "NVFP4/MXFP4 runs fail before model construction on unsupported setups."
+        )
+
+    def apply_training_quantization(self) -> None:
+        bitnet_cfg = self.configs.training.get("bitnet", None)
+        if bitnet_cfg is None or not bitnet_cfg.get("enabled", False):
+            return
+        report = apply_bitnet_quantization(self.model, bitnet_cfg)
+        logger.info(
+            "Enabled BitNet QAT: replaced %d linear modules covering %.2fM "
+            "parameters; skipped %d modules.",
+            report.replaced_modules,
+            report.replaced_parameters / 1_000_000,
+            report.skipped_modules,
         )
 
     def cast_trainable_parameters(self, dtype: torch.dtype) -> None:

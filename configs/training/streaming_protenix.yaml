@@ -32,6 +32,19 @@ training:
   gradient_accumulation_steps: 1
   gradient_clip_norm: 10.0
   ema_decay: 0.999
+  bitnet:
+    enabled: false
+    weight_bits: 1.58
+    activation_bits: 8
+    quantize_activations: true
+    only_trainable: true
+    min_features: 0
+    exclude_name_contains: []
+    eps: 1e-5
+  fp4:
+    enabled: false
+    format: nvfp4
+    backend: transformer_engine
   optimizer:
     name: adam
     lr: 0.00018
