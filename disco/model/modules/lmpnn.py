@@ -46,6 +46,20 @@ _ENCODE_VMAP_IN_DIMS = (
     None,  # number_of_ligand_atoms
     None,  # model
 )
+_ENCODE_BATCHED_VMAP_IN_DIMS = (
+    0,  # Y
+    0,  # Y_m
+    0,  # Y_t
+    0,  # X
+    0,  # S
+    0,  # mask
+    0,  # R_idx
+    0,  # chain_labels
+    0,  # chain_mask
+    0,  # structure_noise_level
+    None,  # number_of_ligand_atoms
+    None,  # model
+)
 
 _SAMPLE_VMAP_IN_DIMS = (*_ENCODE_VMAP_IN_DIMS, None)
 
@@ -237,44 +251,99 @@ class LigandMPNN(torch.nn.Module):
                 and 'structure_noise_level'.
         """
         is_protein = input_feature_dict["is_protein"].bool()
-        atomic_ids = input_feature_dict["ref_element"][~is_protein].argmax(dim=1)
-
-        # LMPNN expects things the BB order to be N, CA, C, O
-        bb_atom_mask = input_feature_dict["backbone_atom_mask"]
-        if bb_atom_mask.ndim == 1:
-            bb_atoms = x_noised[:, bb_atom_mask]
+        atom_valid = input_feature_dict.get("ref_mask")
+        if atom_valid is None:
+            atom_valid = torch.ones_like(is_protein, dtype=torch.bool)
         else:
-            n_bb_atoms_by_sample = bb_atom_mask.sum(dim=1)
-            assert (n_bb_atoms_by_sample[0] == n_bb_atoms_by_sample).all()
-
-            bb_atoms = x_noised[bb_atom_mask].reshape(
-                x_noised.shape[0], n_bb_atoms_by_sample[0], x_noised.shape[2]
-            )
-
-        bb_atoms = bb_atoms.reshape(bb_atoms.shape[0], bb_atoms.shape[1] // 4, 4, 3)
-
+            atom_valid = atom_valid.to(device=x_noised.device, dtype=torch.bool)
+            if atom_valid.ndim == is_protein.ndim + 1:
+                atom_valid = atom_valid.squeeze(-1)
+        non_protein_mask = (~is_protein) & atom_valid
         to_lmpnn_ele = lambda x: LMPNN_ELEMENT_DICT[
             OUR_ELE_TO_LMPNN_MAP[ATOMIC_NUM_TO_ELE_NAME[x.item()]]
         ]
 
-        lmpnn_eles = torch.tensor(
-            list(map(to_lmpnn_ele, atomic_ids)),
-            device=x_noised.device,
-            dtype=torch.int32,
-        )
+        # LMPNN expects things the BB order to be N, CA, C, O
+        bb_atom_mask = input_feature_dict["backbone_atom_mask"].bool()
+        if bb_atom_mask.ndim == 1:
+            bb_atom_mask = bb_atom_mask & atom_valid
+            bb_atoms = x_noised[:, bb_atom_mask]
+            bb_atoms = bb_atoms.reshape(bb_atoms.shape[0], bb_atoms.shape[1] // 4, 4, 3)
+            residue_mask = torch.ones(bb_atoms.shape[:2], device=bb_atoms.device)
+            atomic_ids = input_feature_dict["ref_element"][non_protein_mask].argmax(
+                dim=1
+            )
+            lmpnn_eles = torch.tensor(
+                list(map(to_lmpnn_ele, atomic_ids)),
+                device=x_noised.device,
+                dtype=torch.int32,
+            )
+            lmpnn_eles = lmpnn_eles.unsqueeze(0).repeat(len(bb_atoms), 1)
+        else:
+            bb_atom_mask = bb_atom_mask & atom_valid
+            n_bb_res_by_sample = bb_atom_mask.sum(dim=1) // 4
+            max_bb_res = int(n_bb_res_by_sample.max().item())
+            bb_atoms = x_noised.new_zeros(
+                (x_noised.shape[0], max_bb_res, 4, x_noised.shape[-1])
+            )
+            residue_mask = torch.zeros(
+                (x_noised.shape[0], max_bb_res),
+                device=x_noised.device,
+                dtype=torch.float32,
+            )
+            for batch_idx, n_res in enumerate(n_bb_res_by_sample.tolist()):
+                if n_res == 0:
+                    continue
+                bb_atoms[batch_idx, :n_res] = x_noised[
+                    batch_idx, bb_atom_mask[batch_idx]
+                ].reshape(n_res, 4, x_noised.shape[-1])
+                residue_mask[batch_idx, :n_res] = 1.0
 
-        lmpnn_eles = lmpnn_eles.unsqueeze(0).repeat(len(bb_atoms), 1)
-
-        have_non_prot_atoms = (~is_protein).any()
-        Y, Y_m, Y_t = None, None, None
+        have_non_prot_atoms = non_protein_mask.any()
         if have_non_prot_atoms:
-            if is_protein.ndim > 1:
-                Y = x_noised[~is_protein].reshape(len(is_protein), -1, 3)
+            if non_protein_mask.ndim > 1:
+                n_non_protein_by_sample = non_protein_mask.sum(dim=1)
+                max_non_protein = max(int(n_non_protein_by_sample.max().item()), 1)
+                Y = x_noised.new_zeros((len(x_noised), max_non_protein, 3))
+                Y_m = torch.zeros(
+                    (len(x_noised), max_non_protein),
+                    device=x_noised.device,
+                    dtype=torch.float32,
+                )
+                Y_t = torch.zeros(
+                    (len(x_noised), max_non_protein),
+                    device=x_noised.device,
+                    dtype=torch.int32,
+                )
+                for batch_idx, n_non_protein in enumerate(
+                    n_non_protein_by_sample.tolist()
+                ):
+                    if n_non_protein == 0:
+                        continue
+                    sample_mask = non_protein_mask[batch_idx]
+                    Y[batch_idx, :n_non_protein] = x_noised[batch_idx, sample_mask]
+                    Y_m[batch_idx, :n_non_protein] = 1.0
+                    atomic_ids = input_feature_dict["ref_element"][
+                        batch_idx, sample_mask
+                    ].argmax(dim=1)
+                    Y_t[batch_idx, :n_non_protein] = torch.tensor(
+                        list(map(to_lmpnn_ele, atomic_ids)),
+                        device=x_noised.device,
+                        dtype=torch.int32,
+                    )
             else:
-                Y = x_noised[:, ~is_protein]
-
-            Y_m = torch.ones_like(Y)[..., 0]
-            Y_t = lmpnn_eles
+                atomic_ids = input_feature_dict["ref_element"][
+                    non_protein_mask
+                ].argmax(dim=1)
+                lmpnn_eles = torch.tensor(
+                    list(map(to_lmpnn_ele, atomic_ids)),
+                    device=x_noised.device,
+                    dtype=torch.int32,
+                )
+                lmpnn_eles = lmpnn_eles.unsqueeze(0).repeat(len(bb_atoms), 1)
+                Y = x_noised[:, non_protein_mask]
+                Y_m = torch.ones_like(Y)[..., 0]
+                Y_t = lmpnn_eles
         else:
             Y = torch.zeros(
                 (len(x_noised), 1, 3), device=x_noised.device, dtype=torch.float
@@ -292,10 +361,12 @@ class LigandMPNN(torch.nn.Module):
             "Y_t": Y_t,
             "X": bb_atoms,
             "S": torch.ones(bb_atoms.shape[:2], device=bb_atoms.device),
-            "mask": torch.ones(bb_atoms.shape[:2], device=bb_atoms.device),
+            "mask": residue_mask,
             "R_idx": input_feature_dict["backbone_residue_index"],
             "chain_labels": input_feature_dict["backbone_chain_label"],
-            "chain_mask": torch.ones_like(input_feature_dict["backbone_chain_label"]),
+            "chain_mask": residue_mask.to(
+                dtype=input_feature_dict["backbone_chain_label"].dtype
+            ),
             "structure_noise_level": structure_noise_level,
         }
 
@@ -329,8 +400,15 @@ class LigandMPNN(torch.nn.Module):
             x_noised, input_feature_dict, structure_noise_level
         )
 
+        in_dims = (
+            _ENCODE_BATCHED_VMAP_IN_DIMS
+            if lmpnn_input_dict["R_idx"].ndim == 2
+            else _ENCODE_VMAP_IN_DIMS
+        )
         vmap_fxn = torch.vmap(
-            call_encode, in_dims=_ENCODE_VMAP_IN_DIMS, chunk_size=self.batch_size
+            call_encode,
+            in_dims=in_dims,
+            chunk_size=self.batch_size,
         )
 
         if len(lmpnn_input_dict["structure_noise_level"]) != len(lmpnn_input_dict["Y"]):

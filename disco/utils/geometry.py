@@ -122,15 +122,43 @@ class DistOneHotCalculator:
         if self.bins.device != atom_positions.device:
             self.bins = self.bins.to(device=atom_positions.device)
 
+        n_tokens = input_feature_dict["residue_index"].shape[-1]
         rep_atom_positions = None
+        rep_token_mask = None
         rep_atom_mask = input_feature_dict["distogram_rep_atom_mask"].to(
             dtype=torch.bool
         )
         match atom_positions.ndim:
             case 2:
                 rep_atom_positions = atom_positions[rep_atom_mask]
+                if rep_atom_positions.shape[-2] != n_tokens:
+                    rep_token_mask = torch.zeros(
+                        (n_tokens,), device=atom_positions.device, dtype=torch.bool
+                    )
+                    n = min(rep_atom_positions.shape[-2], n_tokens)
+                    padded_positions = atom_positions.new_zeros((n_tokens, 3))
+                    padded_positions[:n] = rep_atom_positions[:n]
+                    rep_token_mask[:n] = True
+                    rep_atom_positions = padded_positions
             case 3:
-                rep_atom_positions = atom_positions[:, rep_atom_mask]
+                if rep_atom_mask.ndim == 1:
+                    rep_atom_positions = atom_positions[:, rep_atom_mask]
+                else:
+                    rep_atom_positions = atom_positions.new_zeros(
+                        (atom_positions.shape[0], n_tokens, atom_positions.shape[-1])
+                    )
+                    rep_token_mask = torch.zeros(
+                        (atom_positions.shape[0], n_tokens),
+                        device=atom_positions.device,
+                        dtype=torch.bool,
+                    )
+                    for batch_idx in range(atom_positions.shape[0]):
+                        sample_positions = atom_positions[batch_idx][
+                            rep_atom_mask[batch_idx]
+                        ]
+                        n = min(sample_positions.shape[0], n_tokens)
+                        rep_atom_positions[batch_idx, :n] = sample_positions[:n]
+                        rep_token_mask[batch_idx, :n] = True
             case _:
                 raise ValueError(
                     f"Had invalid atom_positions ndim of {atom_positions.ndim}"
@@ -141,7 +169,6 @@ class DistOneHotCalculator:
         )
         squared_l2 = diffs.pow(2).sum(dim=-1)
 
-        n_tokens = input_feature_dict["residue_index"].shape[-1]
         not_same_res_mask = ~torch.diag(
             torch.ones((n_tokens,), device=atom_positions.device, dtype=torch.bool)
         )
@@ -152,6 +179,8 @@ class DistOneHotCalculator:
             )
 
         mask = (squared_l2 < self.squared_bin_max) & not_same_res_mask
+        if rep_token_mask is not None:
+            mask = mask & rep_token_mask.unsqueeze(-1) & rep_token_mask.unsqueeze(-2)
 
         bins = self.bins
         while bins.ndim < squared_l2.ndim + 1:
