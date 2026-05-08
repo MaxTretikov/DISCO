@@ -166,6 +166,53 @@ class TrainRunner:
             if parameter.requires_grad:
                 parameter.data = parameter.data.to(dtype=dtype)
 
+    def compile_model_if_requested(self) -> None:
+        compile_cfg = self.configs.training.get("compile", None)
+        if compile_cfg is None or not compile_cfg.get("enabled", False):
+            return
+
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("training.compile.enabled=true requires torch.compile.")
+
+        target = compile_cfg.get("target", "model")
+        backend = compile_cfg.get("backend", "inductor")
+        mode = compile_cfg.get("mode", "reduce-overhead")
+        fullgraph = bool(compile_cfg.get("fullgraph", False))
+        dynamic = bool(compile_cfg.get("dynamic", False))
+
+        def compile_module(module: torch.nn.Module) -> torch.nn.Module:
+            return torch.compile(
+                module,
+                backend=backend,
+                mode=mode,
+                fullgraph=fullgraph,
+                dynamic=dynamic,
+            )
+
+        target_modules = {
+            "pairformer": ["pairformer_stack"],
+            "diffusion": ["diffusion_module"],
+            "pairformer_and_diffusion": ["pairformer_stack", "diffusion_module"],
+        }.get(target)
+        if target_modules is None:
+            raise ValueError(
+                "training.compile.target must be one of 'pairformer', 'diffusion', "
+                "or 'pairformer_and_diffusion'."
+            )
+
+        for module_name in target_modules:
+            logger.info(
+                "Compiling %s with torch.compile backend=%s mode=%s.",
+                module_name,
+                backend,
+                mode,
+            )
+            setattr(
+                self.model,
+                module_name,
+                compile_module(getattr(self.model, module_name)),
+            )
+
     def split_muon_parameters(
         self,
     ) -> tuple[list[tuple[str, torch.nn.Parameter]], list[torch.nn.Parameter]]:
@@ -196,6 +243,8 @@ class TrainRunner:
                 "fp32": torch.float32,
             }[cast_model_dtype]
             self.cast_trainable_parameters(dtype)
+
+        self.compile_model_if_requested()
 
         params = [p for p in self.model.parameters() if p.requires_grad]
         if optimizer_name == "adam":
