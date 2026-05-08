@@ -214,10 +214,37 @@ def _select_distogram_representatives(
     coords: torch.Tensor,
     coord_mask: torch.Tensor,
     rep_atom_mask: torch.Tensor,
+    atom_to_token_idx: torch.Tensor | None = None,
+    n_tokens: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     coords = _ensure_batched_coords(coords)
     coord_mask = _ensure_batched_mask(coord_mask, coords.shape[0]).to(dtype=torch.bool)
     rep_atom_mask = rep_atom_mask.to(device=coords.device, dtype=torch.bool)
+
+    if atom_to_token_idx is not None:
+        if n_tokens is None:
+            raise ValueError("n_tokens is required when atom_to_token_idx is provided.")
+        atom_to_token_idx = _ensure_batched_mask(
+            atom_to_token_idx.to(device=coords.device),
+            coords.shape[0],
+        ).long()
+        if rep_atom_mask.ndim == 1:
+            rep_atom_mask = rep_atom_mask.unsqueeze(0).expand(coords.shape[0], -1)
+
+        rep_coords = coords.new_zeros((coords.shape[0], n_tokens, 3))
+        rep_mask = torch.zeros(
+            (coords.shape[0], n_tokens),
+            device=coords.device,
+            dtype=torch.bool,
+        )
+        for batch_idx in range(coords.shape[0]):
+            valid = rep_atom_mask[batch_idx] & coord_mask[batch_idx]
+            valid = valid & (atom_to_token_idx[batch_idx] >= 0)
+            valid = valid & (atom_to_token_idx[batch_idx] < n_tokens)
+            token_idx = atom_to_token_idx[batch_idx, valid]
+            rep_coords[batch_idx, token_idx] = coords[batch_idx, valid]
+            rep_mask[batch_idx, token_idx] = True
+        return rep_coords, rep_mask
 
     if rep_atom_mask.ndim == 2:
         if not (rep_atom_mask == rep_atom_mask[0]).all():
@@ -232,12 +259,15 @@ def distogram_training_loss(
     target_coords: torch.Tensor,
     coord_mask: torch.Tensor,
     rep_atom_mask: torch.Tensor,
+    atom_to_token_idx: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Wrapper around OpenFold distogram loss using DISCO representative atoms."""
     pseudo_beta, pseudo_beta_mask = _select_distogram_representatives(
         target_coords,
         coord_mask,
         rep_atom_mask,
+        atom_to_token_idx=atom_to_token_idx,
+        n_tokens=distogram_logits.shape[-2],
     )
     return openfold_distogram_loss(
         logits=distogram_logits,
@@ -267,4 +297,3 @@ def combine_losses(
         smooth_lddt=smooth_lddt,
         distogram=distogram,
     )
-

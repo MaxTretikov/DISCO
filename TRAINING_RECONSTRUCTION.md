@@ -281,9 +281,15 @@ Run a one-step CPU smoke check with a small PLM and disabled structure encoder:
 CUDA_VISIBLE_DEVICES= uv run python runner/train.py \
   experiment=train_smoke \
   logger=csv \
-  training.dataloader.manifest_path=/tmp/disco_train_manifest.txt \
+  training.dataloader.manifest_path=/mnt/archive/datasets/disco_training/processed/manifest.jsonl \
+  training.dataloader.batch_size=2 \
   training.dataloader.weighted_sampling=true
 ```
+
+The dataloader pads variable atom, token, template, and protein-sequence
+dimensions inside each batch. Structure losses use `coordinate_mask`;
+sequence losses use `true_prot_restype_mask`; distogram targets are scattered
+from representative atoms back onto token indices.
 
 ## Main Risk
 

@@ -54,7 +54,10 @@ IS_PROTEIN, IS_RNA, IS_DNA, IS_LIGAND, IS_METAL_ION = tuple(
 )
 
 
-def esm_tokens_to_sequence(aa_ids: torch.Tensor) -> str | list[str]:
+def esm_tokens_to_sequence(aa_ids: torch.Tensor | list[str]) -> str | list[str]:
+    if isinstance(aa_ids, list):
+        return aa_ids
+
     if aa_ids.ndim == 1:
         sequence_data = "".join(
             [(ESM_MASK_TOKEN if i == MASK_TOKEN_IDX else restypes[i]) for i in aa_ids]
@@ -208,7 +211,11 @@ class HFBertModel(torch.nn.Module):
 
         sequence_data = esm_tokens_to_sequence(aa_ids)
 
-        batch_tokens = self.batch_converter(sequence_data, return_tensors="pt")
+        batch_tokens = self.batch_converter(
+            sequence_data,
+            padding=True,
+            return_tensors="pt",
+        )
         batch_tokens = {k: v.to(self.dummy.device) for k, v in batch_tokens.items()}
 
         # forward through plm
@@ -347,8 +354,24 @@ class LMWrapper(nn.Module):
                 len(input_feature_dict["restype_id"]), dtype=bool
             )
 
-        asym_id = input_feature_dict["asym_id"][prot_residue_mask].reshape(len(seq), -1)
-        lm_output = self.lm_model(seq, asym_id)
+        protein_seq_mask = input_feature_dict.get("true_prot_restype_mask")
+        if seq.ndim == 2 and protein_seq_mask is not None:
+            protein_seq_mask = protein_seq_mask.to(device=seq.device, dtype=torch.bool)
+            sequence_data = [
+                esm_tokens_to_sequence(seq[i, protein_seq_mask[i]])
+                for i in range(seq.shape[0])
+            ]
+            lm_output = self.lm_model(
+                sequence_data,
+                input_feature_dict["asym_id"],
+                validate_single_chain=False,
+            )
+        else:
+            asym_id = input_feature_dict["asym_id"][prot_residue_mask].reshape(
+                len(seq),
+                -1,
+            )
+            lm_output = self.lm_model(seq, asym_id)
         if len(lm_output) == 3:
             single_rep, pair_rep, lm_logits = lm_output
         else:
@@ -369,7 +392,13 @@ class LMWrapper(nn.Module):
             to_add = single.flatten(0, 1)
 
         s_add = torch.zeros_like(s_inputs)
-        s_add[prot_residue_mask] = to_add
+        if seq.ndim == 2 and protein_seq_mask is not None:
+            for i in range(seq.shape[0]):
+                token_idx = prot_residue_mask[i].nonzero(as_tuple=True)[0]
+                n = min(token_idx.shape[0], single.shape[1])
+                s_add[i, token_idx[:n]] = single[i, :n]
+        else:
+            s_add[prot_residue_mask] = to_add
         s_inputs = s_inputs + s_add
 
         newmat_paired = None

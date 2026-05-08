@@ -57,8 +57,16 @@ def _get_label(batch: dict, feature_dict: dict[str, torch.Tensor], key: str) -> 
     raise KeyError(f"Training batch is missing label '{key}'.")
 
 
-def _valid_sequence_mask(feature_dict: dict[str, torch.Tensor], true_seq: torch.Tensor) -> torch.Tensor:
+def _valid_sequence_mask(
+    feature_dict: dict[str, torch.Tensor],
+    true_seq: torch.Tensor,
+) -> torch.Tensor:
     valid = torch.ones_like(true_seq, dtype=torch.bool)
+    true_seq_mask = feature_dict.get("true_prot_restype_mask")
+    if true_seq_mask is not None:
+        valid = valid & true_seq_mask.to(device=true_seq.device, dtype=torch.bool)
+
+    token_valid = None
     for key, invert in [
         ("res_occ_cutoff_mask", False),
         ("res_is_resolved_mask", False),
@@ -67,9 +75,31 @@ def _valid_sequence_mask(feature_dict: dict[str, torch.Tensor], true_seq: torch.
         if key not in feature_dict:
             continue
         mask = feature_dict[key].to(device=true_seq.device, dtype=torch.bool)
-        if mask.ndim == 1 and valid.ndim == 2:
-            mask = mask.unsqueeze(0).expand_as(valid)
-        valid = valid & (~mask if invert else mask)
+        mask = ~mask if invert else mask
+        token_valid = mask if token_valid is None else token_valid & mask
+
+    if token_valid is None:
+        return valid
+
+    prot_residue_mask = feature_dict.get("prot_residue_mask")
+    if prot_residue_mask is None:
+        if token_valid.ndim == 1 and valid.ndim == 2:
+            token_valid = token_valid.unsqueeze(0).expand_as(valid)
+        return valid & token_valid
+
+    if token_valid.ndim == 1:
+        token_valid = token_valid.unsqueeze(0)
+    if prot_residue_mask.ndim == 1:
+        prot_residue_mask = prot_residue_mask.unsqueeze(0)
+
+    protein_valid = torch.zeros_like(valid)
+    for batch_idx in range(valid.shape[0]):
+        sample_valid = token_valid[batch_idx][
+            prot_residue_mask[batch_idx].to(device=true_seq.device, dtype=torch.bool)
+        ]
+        n = min(sample_valid.shape[0], protein_valid.shape[-1])
+        protein_valid[batch_idx, :n] = sample_valid[:n]
+    return valid & protein_valid
     return valid
 
 
@@ -81,6 +111,9 @@ def compute_training_loss(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Runs one DISCO training forward pass and returns total loss plus logs."""
     feature_dict = _require(batch, "input_feature_dict")
+    if "true_prot_restype_mask" in batch:
+        feature_dict = dict(feature_dict)
+        feature_dict["true_prot_restype_mask"] = batch["true_prot_restype_mask"]
     labels = batch.get("labels", {})
     x0_struct = labels.get("coordinate", batch.get("coordinate"))
     coord_mask = labels.get("coordinate_mask", batch.get("coordinate_mask"))
@@ -164,6 +197,7 @@ def compute_training_loss(
         target_coords=x0_struct,
         coord_mask=coord_mask,
         rep_atom_mask=_get_label(batch, feature_dict, "distogram_rep_atom_mask"),
+        atom_to_token_idx=feature_dict.get("atom_to_token_idx"),
     )
 
     losses = combine_losses(

@@ -208,12 +208,15 @@ def remask_masked_reference_features(
             prot_residue_mask[batch_idx].to(dtype=torch.bool),
             as_tuple=False,
         ).squeeze(-1)
-        if sequence_mask.shape[-1] != prot_token_idx.shape[-1]:
+        if sequence_mask.shape[-1] < prot_token_idx.shape[-1]:
             raise ValueError(
-                "sequence_mask length must equal the number of protein tokens: "
-                f"{sequence_mask.shape[-1]} != {prot_token_idx.shape[-1]}"
+                "sequence_mask length must cover the number of protein tokens: "
+                f"{sequence_mask.shape[-1]} < {prot_token_idx.shape[-1]}"
             )
-        full_token_mask[batch_idx, prot_token_idx] = sequence_mask[batch_idx]
+        full_token_mask[batch_idx, prot_token_idx] = sequence_mask[
+            batch_idx,
+            : prot_token_idx.shape[-1],
+        ]
 
     batch_indices = torch.arange(batch_size, device=ref_pos.device)[:, None]
     atom_token_mask = full_token_mask[batch_indices, atom_to_token_idx.long()]

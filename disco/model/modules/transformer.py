@@ -994,13 +994,15 @@ class AtomAttentionDecoder(nn.Module):
             if r.ndim == 3 and prot_res_mask.ndim == 1:
                 r = r[:, prot_res_mask]
             elif r.ndim == 3 and prot_res_mask.ndim == 2:
-                # Only same length proteins are allowed
                 num_prot_tokens = prot_res_mask.sum(dim=-1)
-                assert (num_prot_tokens[0] == num_prot_tokens).all()
-
-                r = r[prot_res_mask].reshape(
-                    *prot_res_mask.shape[:-1], num_prot_tokens[0], r.shape[-1]
+                max_prot_tokens = int(num_prot_tokens.max().item())
+                protein_r = r.new_zeros(
+                    (*prot_res_mask.shape[:-1], max_prot_tokens, r.shape[-1])
                 )
+                for batch_idx in range(prot_res_mask.shape[0]):
+                    n = int(num_prot_tokens[batch_idx].item())
+                    protein_r[batch_idx, :n] = r[batch_idx, prot_res_mask[batch_idx]]
+                r = protein_r
 
             else:
                 r = r[prot_res_mask]

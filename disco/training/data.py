@@ -119,16 +119,91 @@ def _validate_example(example: Mapping[str, Any], path: Path) -> None:
         raise ValueError(f"{path} true_prot_restype must be a tensor with shape [N_prot].")
 
 
+def _padding_value(tensor: torch.Tensor) -> bool | int | float:
+    if tensor.dtype == torch.bool:
+        return False
+    if tensor.dtype.is_floating_point:
+        return 0.0
+    return 0
+
+
+def _pad_tensor_values(values: Sequence[torch.Tensor]) -> torch.Tensor:
+    first = values[0]
+    shapes = [tuple(value.shape) for value in values]
+    if len(set(shapes)) == 1:
+        return torch.stack(list(values), dim=0)
+    if first.ndim == 0:
+        return torch.stack(list(values), dim=0)
+    if any(value.ndim != first.ndim for value in values):
+        raise ValueError(f"Cannot batch tensors with different ranks: {shapes}.")
+
+    max_shape = tuple(max(shape[dim] for shape in shapes) for dim in range(first.ndim))
+    padded = first.new_full(
+        (len(values), *max_shape),
+        fill_value=_padding_value(first),
+    )
+    for batch_idx, value in enumerate(values):
+        slices = (batch_idx, *tuple(slice(0, size) for size in value.shape))
+        padded[slices] = value
+    return padded
+
+
+def _add_padding_masks(batch: dict[str, Any]) -> dict[str, Any]:
+    feature_dict = batch.get("input_feature_dict")
+    if not isinstance(feature_dict, Mapping):
+        return batch
+
+    feature_dict = dict(feature_dict)
+    if "token_index" in feature_dict:
+        token_index = feature_dict["token_index"]
+        if isinstance(token_index, torch.Tensor):
+            token_mask = torch.zeros(
+                token_index.shape,
+                dtype=torch.bool,
+                device=token_index.device,
+            )
+            for batch_idx, example in enumerate(batch.get("_examples", [])):
+                n_token = example["input_feature_dict"]["token_index"].shape[0]
+                token_mask[batch_idx, :n_token] = True
+            if len(batch.get("_examples", [])) == token_index.shape[0]:
+                feature_dict["token_padding_mask"] = token_mask
+
+    if "ref_mask" in feature_dict:
+        ref_mask = feature_dict["ref_mask"]
+        if isinstance(ref_mask, torch.Tensor):
+            atom_mask = torch.zeros(
+                ref_mask.shape,
+                dtype=torch.bool,
+                device=ref_mask.device,
+            )
+            for batch_idx, example in enumerate(batch.get("_examples", [])):
+                n_atom = example["input_feature_dict"]["ref_mask"].shape[0]
+                atom_mask[batch_idx, :n_atom] = True
+            if len(batch.get("_examples", [])) == ref_mask.shape[0]:
+                feature_dict["atom_padding_mask"] = atom_mask
+
+    if "true_prot_restype" in batch:
+        true_seq = batch["true_prot_restype"]
+        if isinstance(true_seq, torch.Tensor):
+            seq_mask = torch.zeros(
+                true_seq.shape,
+                dtype=torch.bool,
+                device=true_seq.device,
+            )
+            for batch_idx, example in enumerate(batch.get("_examples", [])):
+                n_seq = _get_label(example, "true_prot_restype").shape[0]
+                seq_mask[batch_idx, :n_seq] = True
+            if len(batch.get("_examples", [])) == true_seq.shape[0]:
+                batch["true_prot_restype_mask"] = seq_mask
+
+    batch["input_feature_dict"] = feature_dict
+    return batch
+
+
 def _collate_values(values: Sequence[Any], key_path: str) -> Any:
     first = values[0]
     if isinstance(first, torch.Tensor):
-        shapes = [tuple(value.shape) for value in values]
-        if len(set(shapes)) != 1:
-            raise ValueError(
-                f"Cannot batch variable-shape tensors at {key_path}: {shapes}. "
-                "Use batch_size=1 until crop shapes are fixed."
-            )
-        return torch.stack(list(values), dim=0)
+        return _pad_tensor_values(values)
 
     if isinstance(first, Mapping):
         keys = first.keys()
@@ -147,13 +222,17 @@ def _collate_values(values: Sequence[Any], key_path: str) -> Any:
 def training_collate_fn(examples: list[dict[str, Any]]) -> dict[str, Any]:
     """Collates preprocessed training examples.
 
-    Tensors are stacked only when shapes match. Non-tensor metadata is kept as a
-    list. This makes batch size 1 robust for early dataset work while still
-    allowing fixed-shape crops to batch later.
+    Variable-length tensors are padded to the maximum shape in the batch.
+    Existing masks therefore stay false on padded positions, while non-tensor
+    metadata is kept as a list.
     """
     if len(examples) == 0:
         raise ValueError("Cannot collate an empty batch.")
-    return _collate_values(examples, "batch")
+    batch = _collate_values(examples, "batch")
+    batch["_examples"] = examples
+    batch = _add_padding_masks(batch)
+    del batch["_examples"]
+    return batch
 
 
 class PreprocessedTrainingDataset(Dataset):
