@@ -69,6 +69,16 @@ git clone https://github.com/NVIDIA/cutlass.git /path/to/cutlass
 export CUTLASS_PATH=/path/to/cutlass
 ```
 
+Before running with DeepSpeed Evoformer attention, validate the local environment:
+
+```bash
+uv run python runner/preflight_ds4sci.py
+```
+
+The preflight checks common CUTLASS install locations, validates the headers/version,
+runs DeepSpeed's Evoformer op compatibility check, and prints the `CUTLASS_PATH` and
+`TORCH_CUDA_ARCH_LIST` exports to use.
+
 You can add `CUTLASS_PATH` to your shell profile so it persists across sessions. The attention kernels will be compiled the first time they are invoked.
 
 If you prefer to skip the CUTLASS installation, disable DeepSpeed attention on the command line:
