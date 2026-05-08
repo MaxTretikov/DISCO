@@ -252,11 +252,14 @@ uv run python -m disco.training.preprocess \
   --crop-size 384
 ```
 
-Process the downloaded raw PDB archive with the paper reconstruction settings:
+Process the downloaded Protenix/PDB archive with the paper reconstruction
+settings:
 
 ```bash
 uv run python -m disco.training.pdb_dataset \
-  --archive-root /mnt/archive/datasets/disco_training \
+  --archive-root /mnt/archive/datasets/protenix \
+  --source protenix \
+  --protenix-index /mnt/archive/datasets/protenix/indices/indices_20260107-20chains_before_2021-09-30_res4.5.csv.gz \
   --output-dir /mnt/archive/datasets/disco_training/processed/examples \
   --manifest /mnt/archive/datasets/disco_training/processed/manifest.jsonl \
   --metadata /mnt/archive/datasets/disco_training/processed/metadata.jsonl \
@@ -264,10 +267,13 @@ uv run python -m disco.training.pdb_dataset \
   --samples-per-entry 1
 ```
 
-This uses the paper weights for chain/interface samples, the 2021-09-30 cutoff,
-and 20/40/40 contiguous/spatial/interface crops. If Protenix cluster files are
-available, pass them with `--cluster-file`; otherwise the processor falls back
-to identical-sequence clusters from `pdb_seqres.txt.gz`.
+With `--protenix-index`, this uses Protenix's filtered
+`before_2021-09-30_res4.5` train split, chain/interface rows, row-level
+`cluster_id`, and `N_clust` counts from the index itself. It also applies the
+paper weights and 20/40/40 contiguous/spatial/interface crops. Without that
+index, the processor falls back to discovering structures directly, applying
+the 2021-09-30 deposition cutoff, and using identical-sequence clusters from
+`pdb_seqres.txt.gz` or a file passed with `--cluster-file`.
 
 Run a one-step CPU smoke check with a small PLM and disabled structure encoder:
 

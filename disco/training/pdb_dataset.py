@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import gzip
 import json
 import logging
@@ -64,6 +65,14 @@ class SampleRecord:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class ProtenixIndexRow:
+    sample_kind: str
+    chain_ids: tuple[str, ...]
+    cluster_id: str
+    deposition_date: str | None
+
+
 def _entry_id_from_path(path: Path) -> str:
     name = path.name
     if name.endswith(".gz"):
@@ -82,9 +91,37 @@ def _structure_paths(archive_root: Path, source: str) -> list[Path]:
     elif source == "mmcif":
         root = archive_root / "pdb" / "mmcif"
         pattern = "*.cif.gz"
+    elif source == "protenix":
+        root = archive_root / "mmcif"
+        pattern = "*.cif"
     else:
         raise ValueError(f"Unknown structure source: {source}")
+    if source == "protenix":
+        return sorted(root.glob(pattern))
     return sorted(root.glob(f"*/{pattern}"))
+
+
+def _structure_path_for_entry(archive_root: Path, source: str, entry_id: str) -> Path:
+    if source == "biounit":
+        candidates = sorted(
+            (archive_root / "pdb" / "biounit" / entry_id[1:3]).glob(
+                f"{entry_id}.pdb*.gz"
+            )
+        )
+        if not candidates:
+            candidates = sorted(
+                (archive_root / "pdb" / "biounit" / entry_id[1:3]).glob(
+                    f"{entry_id.lower()}.pdb*.gz"
+                )
+            )
+        if not candidates:
+            return archive_root / "pdb" / "biounit" / entry_id[1:3] / f"{entry_id}.pdb1.gz"
+        return candidates[0]
+    if source == "mmcif":
+        return archive_root / "pdb" / "mmcif" / entry_id[1:3] / f"{entry_id}.cif.gz"
+    if source == "protenix":
+        return archive_root / "mmcif" / f"{entry_id}.cif"
+    raise ValueError(f"Unknown structure source: {source}")
 
 
 def _mmcif_path_for_entry(archive_root: Path, entry_id: str) -> Path:
@@ -164,6 +201,85 @@ def _read_cluster_file(cluster_file: Path | None) -> dict[str, tuple[str, int]]:
     }
 
 
+def _open_text(path: Path):
+    return (
+        gzip.open(path, "rt", errors="replace")
+        if path.suffix == ".gz"
+        else path.open("rt", errors="replace")
+    )
+
+
+def _read_protenix_index(
+    index_path: Path | None,
+    cutoff: date | None,
+) -> tuple[dict[str, list[ProtenixIndexRow]], dict[str, int]]:
+    if index_path is None:
+        return {}, {}
+
+    entry_rows: dict[str, list[ProtenixIndexRow]] = {}
+    cluster_counts: dict[str, int] = {}
+    with _open_text(index_path) as handle:
+        reader = csv.DictReader(handle)
+        required = {"pdb_id", "type", "chain_1_id", "cluster_id"}
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"Protenix index {index_path} is missing columns: {sorted(missing)}"
+            )
+
+        for row in reader:
+            sample_kind = (row.get("type") or "").strip()
+            if sample_kind not in _BETA:
+                continue
+
+            mol_types = {
+                (row.get("mol_1_type") or "").strip(),
+                (row.get("mol_2_type") or "").strip(),
+            }
+            if "prot" not in mol_types:
+                continue
+
+            deposition_date = (row.get("release_date") or "").strip() or None
+            if not _passes_cutoff(deposition_date, cutoff):
+                continue
+
+            entry_id = (row.get("pdb_id") or "").strip().lower()
+            if not entry_id:
+                continue
+
+            chain_ids = tuple(
+                chain_id
+                for chain_id in (
+                    (row.get("chain_1_id") or "").strip(),
+                    (row.get("chain_2_id") or "").strip(),
+                )
+                if chain_id
+            )
+            if len(chain_ids) == 0:
+                continue
+
+            cluster_id = (row.get("cluster_id") or "").strip().lower()
+            if not cluster_id:
+                cluster_parts = [
+                    (row.get("cluster_1_id") or "").strip().lower(),
+                    (row.get("cluster_2_id") or "").strip().lower(),
+                ]
+                cluster_id = "+".join(sorted(part for part in cluster_parts if part))
+            if not cluster_id:
+                cluster_id = "+".join(f"{entry_id}_{chain_id}".lower() for chain_id in chain_ids)
+
+            index_row = ProtenixIndexRow(
+                sample_kind=sample_kind,
+                chain_ids=chain_ids,
+                cluster_id=cluster_id,
+                deposition_date=deposition_date,
+            )
+            entry_rows.setdefault(entry_id, []).append(index_row)
+            cluster_counts[cluster_id] = cluster_counts.get(cluster_id, 0) + 1
+
+    return entry_rows, cluster_counts
+
+
 def _token_metadata(atom_array):
     token_array = AtomArrayTokenizer(atom_array).get_token_array()
     centre_indices = np.asarray(token_array.get_annotation("centre_atom_index"))
@@ -198,6 +314,26 @@ def _cluster_for_chains(
         clusters.append(cluster_id)
         sizes.append(cluster_size)
     return "+".join(sorted(clusters)), max(sizes, default=1)
+
+
+def _token_mask_for_index_chains(
+    token_chain_ids: np.ndarray,
+    index_chain_ids: tuple[str, ...],
+) -> np.ndarray:
+    token_mask = np.zeros(token_chain_ids.shape, dtype=bool)
+    for index_chain_id in index_chain_ids:
+        token_mask |= token_chain_ids == index_chain_id
+        suffix_mask = np.fromiter(
+            (
+                token_chain_id.startswith(index_chain_id)
+                and token_chain_id[len(index_chain_id) :].isdigit()
+                for token_chain_id in token_chain_ids
+            ),
+            dtype=bool,
+            count=len(token_chain_ids),
+        )
+        token_mask |= suffix_mask
+    return token_mask
 
 
 def _sample_weight(
@@ -292,6 +428,51 @@ def build_sample_records(
                     deposition_date=deposition_date,
                 )
             )
+
+    return records
+
+
+def build_sample_records_from_protenix_index(
+    atom_array,
+    structure_path: Path,
+    entry_id: str,
+    index_rows: list[ProtenixIndexRow],
+    cluster_counts: dict[str, int],
+) -> list[SampleRecord]:
+    _, token_chain_ids, token_mol_types, _ = _token_metadata(atom_array)
+    records = []
+
+    for index_row in index_rows:
+        token_mask = _token_mask_for_index_chains(token_chain_ids, index_row.chain_ids)
+        token_indices = np.nonzero(token_mask)[0]
+        if len(token_indices) == 0:
+            continue
+
+        n_prot, n_nuc, n_ligand = _count_token_types(token_mol_types, token_indices)
+        cluster_size = cluster_counts.get(index_row.cluster_id, 1)
+        weight = _sample_weight(
+            index_row.sample_kind,
+            n_prot,
+            n_nuc,
+            n_ligand,
+            cluster_size,
+        )
+        records.append(
+            SampleRecord(
+                entry_id=entry_id,
+                structure_path=str(structure_path),
+                sample_kind=index_row.sample_kind,
+                chain_ids=index_row.chain_ids,
+                selected_token_indices=tuple(int(i) for i in token_indices),
+                n_prot=n_prot,
+                n_nuc=n_nuc,
+                n_ligand=n_ligand,
+                cluster_id=index_row.cluster_id,
+                cluster_size=cluster_size,
+                weight=weight,
+                deposition_date=index_row.deposition_date,
+            )
+        )
 
     return records
 
@@ -403,6 +584,7 @@ def process_pdb_archive(
     bb_only: bool = True,
     cluster_file: str | Path | None = None,
     seqres_path: str | Path | None = None,
+    protenix_index: str | Path | None = None,
     suppress_parser_warnings: bool = True,
 ) -> Path:
     archive_root = Path(archive_root)
@@ -415,6 +597,10 @@ def process_pdb_archive(
         seqres_path = archive_root / "derived" / "pdb_seqres.txt.gz"
     cluster_map = _read_seqres_clusters(Path(seqres_path))
     cluster_map.update(_read_cluster_file(Path(cluster_file) if cluster_file else None))
+    protenix_rows, protenix_cluster_counts = _read_protenix_index(
+        Path(protenix_index) if protenix_index else None,
+        cutoff,
+    )
 
     rng = np.random.default_rng(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -427,21 +613,53 @@ def process_pdb_archive(
     if suppress_parser_warnings:
         parser_logger.setLevel(logging.ERROR)
 
-    structure_paths = _structure_paths(archive_root, source)
-    if max_entries is not None:
-        structure_paths = structure_paths[:max_entries]
+    if protenix_rows:
+        entry_ids = sorted(protenix_rows)
+        if max_entries is not None:
+            entry_ids = entry_ids[:max_entries]
+        structure_items = [
+            (
+                _structure_path_for_entry(archive_root, source, entry_id),
+                entry_id,
+                protenix_rows[entry_id],
+            )
+            for entry_id in entry_ids
+        ]
+    else:
+        structure_paths = _structure_paths(archive_root, source)
+        if max_entries is not None:
+            structure_paths = structure_paths[:max_entries]
+        structure_items = [
+            (structure_path, _entry_id_from_path(structure_path), None)
+            for structure_path in structure_paths
+        ]
 
     try:
         sample_index = 0
         with manifest_path.open("w") as manifest_handle:
             metadata_handle = metadata_path.open("w") if metadata_path is not None else None
             try:
-                for structure_path in structure_paths:
-                    entry_id = _entry_id_from_path(structure_path)
-                    deposition_date = _read_mmcif_deposition_date(
-                        _mmcif_path_for_entry(archive_root, entry_id)
+                for structure_path, entry_id, index_rows in structure_items:
+                    if not structure_path.exists():
+                        if metadata_handle is not None:
+                            metadata_handle.write(
+                                json.dumps(
+                                    {
+                                        "entry_id": entry_id,
+                                        "structure_path": str(structure_path),
+                                        "error": "missing structure file",
+                                    }
+                                )
+                                + "\n"
+                            )
+                        continue
+                    deposition_path = (
+                        structure_path
+                        if source == "protenix"
+                        else _mmcif_path_for_entry(archive_root, entry_id)
                     )
-                    if not _passes_cutoff(deposition_date, cutoff):
+                    deposition_date = _read_mmcif_deposition_date(deposition_path)
+                    if index_rows is None and not _passes_cutoff(deposition_date, cutoff):
                         continue
 
                     try:
@@ -449,13 +667,22 @@ def process_pdb_archive(
                             structure_path,
                             bb_only=bb_only,
                         )
-                        records = build_sample_records(
-                            atom_array,
-                            structure_path,
-                            entry_id,
-                            cluster_map,
-                            deposition_date,
-                        )
+                        if index_rows is None:
+                            records = build_sample_records(
+                                atom_array,
+                                structure_path,
+                                entry_id,
+                                cluster_map,
+                                deposition_date,
+                            )
+                        else:
+                            records = build_sample_records_from_protenix_index(
+                                atom_array,
+                                structure_path,
+                                entry_id,
+                                index_rows,
+                                protenix_cluster_counts,
+                            )
                         records = [
                             record
                             for record in records
@@ -552,7 +779,11 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--metadata", default=None)
-    parser.add_argument("--source", choices=["biounit", "mmcif"], default="biounit")
+    parser.add_argument(
+        "--source",
+        choices=["biounit", "mmcif", "protenix"],
+        default="biounit",
+    )
     parser.add_argument("--cutoff-date", default="2021-09-30")
     parser.add_argument("--crop-size", type=int, default=384)
     parser.add_argument(
@@ -565,6 +796,15 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cluster-file", default=None)
     parser.add_argument("--seqres-path", default=None)
+    parser.add_argument(
+        "--protenix-index",
+        default=None,
+        help=(
+            "Optional Protenix index CSV/CSV.GZ. When provided, rows from this "
+            "index define the train split, chain/interface samples, and "
+            "cluster-size weights."
+        ),
+    )
     parser.add_argument("--show-parser-warnings", action="store_true")
     parser.add_argument("--all-atom-distogram", action="store_true")
     args = parser.parse_args()
@@ -584,6 +824,7 @@ def main() -> None:
         bb_only=not args.all_atom_distogram,
         cluster_file=args.cluster_file,
         seqres_path=args.seqres_path,
+        protenix_index=args.protenix_index,
         suppress_parser_warnings=not args.show_parser_warnings,
     )
     print(manifest)
