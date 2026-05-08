@@ -29,6 +29,7 @@ training:
     cache_cleanup_interval: 128
     drop_bond_mask: true
   sequence_conditioning_mode: scheduler
+  gradient_accumulation_steps: 1
   gradient_clip_norm: 10.0
   ema_decay: 0.999
   optimizer:

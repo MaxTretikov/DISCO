@@ -200,10 +200,23 @@ class TrainRunner:
         path = ckpt_dir / f"step_{step:07d}.pt"
         self.fabric.save(path, checkpoint)
 
+    def _next_batch(self, dataloader_iter):
+        try:
+            return next(dataloader_iter), dataloader_iter
+        except StopIteration:
+            dataloader_iter = iter(self.dataloader)
+            return next(dataloader_iter), dataloader_iter
+
     def train(self) -> None:
         self.model.train()
         start_step = getattr(self, "start_step", 0)
         max_steps = self.configs.training.max_steps
+        gradient_accumulation_steps = int(
+            self.configs.training.get("gradient_accumulation_steps", 1)
+        )
+        if gradient_accumulation_steps < 1:
+            raise ValueError("training.gradient_accumulation_steps must be >= 1.")
+
         train_precision = {
             "fp32": torch.float32,
             "bf16": torch.bfloat16,
@@ -211,12 +224,14 @@ class TrainRunner:
         }[self.configs.dtype]
 
         step = start_step
+        dataloader_iter = iter(self.dataloader)
         while step < max_steps:
-            for batch in self.dataloader:
-                if step >= max_steps:
-                    break
+            lr = self.scheduler.step(step)
+            self.optimizer.zero_grad(set_to_none=True)
+            accumulated_logs: dict[str, torch.Tensor] = {}
 
-                lr = self.scheduler.step(step)
+            for micro_step in range(gradient_accumulation_steps):
+                batch, dataloader_iter = self._next_batch(dataloader_iter)
                 batch = to_device(batch, self.device)
                 enable_amp = (
                     torch.autocast(device_type="cuda", dtype=train_precision)
@@ -234,35 +249,52 @@ class TrainRunner:
                         ),
                     )
 
-                self.optimizer.zero_grad(set_to_none=True)
-                self.fabric.backward(loss)
-                self.fabric.clip_gradients(
-                    self.model,
-                    self.optimizer,
-                    max_norm=self.configs.training.gradient_clip_norm,
+                for key, value in log_dict.items():
+                    detached = value.detach()
+                    accumulated_logs[key] = accumulated_logs.get(key, 0.0) + detached
+
+                sync_context = (
+                    self.fabric.no_backward_sync(
+                        self.model,
+                        enabled=micro_step < gradient_accumulation_steps - 1,
+                    )
+                    if hasattr(self.fabric, "no_backward_sync")
+                    else nullcontext()
                 )
-                self.optimizer.step()
-                self.ema.update(self.model)
+                with sync_context:
+                    self.fabric.backward(loss / gradient_accumulation_steps)
 
-                if step % self.configs.training.log_every_n_steps == 0:
-                    log_values = {
-                        key: float(value.detach().float().cpu())
-                        for key, value in log_dict.items()
-                    }
-                    log_values["lr"] = lr
-                    self.fabric.log_dict(log_values, step=step)
-                    if self.fabric.is_global_zero:
-                        logger.info(
-                            "step=%d loss=%.4f lr=%.6g",
-                            step,
-                            log_values["loss/total"],
-                            lr,
-                        )
+            self.fabric.clip_gradients(
+                self.model,
+                self.optimizer,
+                max_norm=self.configs.training.gradient_clip_norm,
+            )
+            self.optimizer.step()
+            self.ema.update(self.model)
 
-                if step > 0 and step % self.configs.training.save_every_n_steps == 0:
-                    self.save_checkpoint(step)
+            if step % self.configs.training.log_every_n_steps == 0:
+                log_values = {
+                    key: float(
+                        (value / gradient_accumulation_steps).detach().float().cpu()
+                    )
+                    for key, value in accumulated_logs.items()
+                }
+                log_values["lr"] = lr
+                log_values["gradient_accumulation_steps"] = gradient_accumulation_steps
+                self.fabric.log_dict(log_values, step=step)
+                if self.fabric.is_global_zero:
+                    logger.info(
+                        "step=%d loss=%.4f lr=%.6g grad_accum=%d",
+                        step,
+                        log_values["loss/total"],
+                        lr,
+                        gradient_accumulation_steps,
+                    )
 
-                step += 1
+            if step > 0 and step % self.configs.training.save_every_n_steps == 0:
+                self.save_checkpoint(step)
+
+            step += 1
 
         self.save_checkpoint(step)
 
