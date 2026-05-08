@@ -59,6 +59,7 @@ class PairformerBlock(nn.Module):
         c_hidden_pair_att: int = 32,
         no_heads_pair: int = 4,
         dropout: float = 0.25,
+        fuse_transition_gating: bool = False,
     ) -> None:
         super().__init__()
         self.n_heads = n_heads
@@ -77,13 +78,21 @@ class PairformerBlock(nn.Module):
             no_heads=no_heads_pair,
         )
         self.dropout_row = DropoutRowwise(dropout)
-        self.pair_transition = Transition(c_in=c_z, n=4)
+        self.pair_transition = Transition(
+            c_in=c_z,
+            n=4,
+            fuse_gated_activation=fuse_transition_gating,
+        )
         self.c_s = c_s
         if self.c_s > 0:
             self.attention_pair_bias = AttentionPairBias(
                 has_s=False, n_heads=n_heads, c_a=c_s, c_z=c_z
             )
-            self.single_transition = Transition(c_in=c_s, n=4)
+            self.single_transition = Transition(
+                c_in=c_s,
+                n=4,
+                fuse_gated_activation=fuse_transition_gating,
+            )
 
     def forward(
         self,
@@ -223,18 +232,26 @@ class PairformerStack(nn.Module):
         c_s: int = 384,
         dropout: float = 0.25,
         blocks_per_ckpt: int | None = None,
+        fuse_transition_gating: bool = False,
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
         self.n_heads = n_heads
         self.blocks_per_ckpt = blocks_per_ckpt
+        self.fuse_transition_gating = fuse_transition_gating
         if self.n_blocks < 0:
             logger.info("Disabling pairformer")
             return
         self.blocks = nn.ModuleList()
 
         for _ in range(n_blocks):
-            block = PairformerBlock(n_heads=n_heads, c_z=c_z, c_s=c_s, dropout=dropout)
+            block = PairformerBlock(
+                n_heads=n_heads,
+                c_z=c_z,
+                c_s=c_s,
+                dropout=dropout,
+                fuse_transition_gating=fuse_transition_gating,
+            )
             self.blocks.append(block)
 
     def _prep_blocks(

@@ -61,6 +61,7 @@ model:
     n_heads: 16
     dropout: 0.25
     blocks_per_ckpt: ${blocks_per_ckpt}
+    fuse_transition_gating: false
   diffusion_module:
     use_fine_grained_checkpoint: true
     do_fourier_embed_seq: true
