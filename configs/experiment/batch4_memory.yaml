@@ -1,0 +1,24 @@
+# @package _global_
+
+# Memory-oriented profile for physical batch-size 4 on a 24 GiB RTX 4090.
+# Use with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True.
+model:
+  pairformer:
+    transition_chunk_size: 128
+    fuse_transition_gating: true
+
+normal_attention:
+  use_sdpa: true
+  sdpa_backend: efficient
+
+structure_encoder:
+  args:
+    batch_size: 1
+
+training:
+  dataloader:
+    batch_size: 4
+  gradient_accumulation_steps: 1
+  optimizer:
+    name: flash_adam
+    cast_model_dtype: bf16
