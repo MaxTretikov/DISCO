@@ -95,6 +95,7 @@ class PairformerBlock(nn.Module):
         use_lma: bool = False,
         inplace_safe: bool = False,
         chunk_size: int | None = None,
+        transition_chunk_size: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """
         Forward pass of the PairformerBlock.
@@ -144,7 +145,7 @@ class PairformerBlock(nn.Module):
                 chunk_size=chunk_size,
             )
             z = z.transpose(-2, -3).contiguous()
-            z += self.pair_transition(z)
+            z += self.pair_transition(z, chunk_size=transition_chunk_size)
             if self.c_s > 0:
                 s += self.attention_pair_bias(
                     a=s,
@@ -189,7 +190,7 @@ class PairformerBlock(nn.Module):
             )
             z = z.transpose(-2, -3)
 
-            z = z + self.pair_transition(z)
+            z = z + self.pair_transition(z, chunk_size=transition_chunk_size)
             if self.c_s > 0:
                 s = s + self.attention_pair_bias(
                     a=s,
@@ -223,11 +224,13 @@ class PairformerStack(nn.Module):
         c_s: int = 384,
         dropout: float = 0.25,
         blocks_per_ckpt: int | None = None,
+        transition_chunk_size: int | None = None,
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
         self.n_heads = n_heads
         self.blocks_per_ckpt = blocks_per_ckpt
+        self.transition_chunk_size = transition_chunk_size
         if self.n_blocks < 0:
             logger.info("Disabling pairformer")
             return
@@ -256,6 +259,7 @@ class PairformerStack(nn.Module):
                 use_lma=use_lma,
                 inplace_safe=inplace_safe,
                 chunk_size=chunk_size,
+                transition_chunk_size=self.transition_chunk_size,
             )
             for b in self.blocks
         ]
