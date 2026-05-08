@@ -1,0 +1,46 @@
+# @package _global_
+training:
+  max_steps: 160000
+  log_every_n_steps: 10
+  save_every_n_steps: 1000
+  checkpoint_dir: ${paths.run_dir}/checkpoints
+  resume_checkpoint_path: null
+  dataloader:
+    _target_: disco.training.streaming.create_streaming_protenix_dataloader
+    archive_root: /mnt/archive/datasets/protenix
+    protenix_index: >-
+      /mnt/archive/datasets/protenix/indices/indices_20260107-20chains_before_2021-09-30_res4.5.csv.gz
+    cache_dir: /mnt/archive/datasets/disco_training/cache/protenix
+    batch_size: 1
+    shuffle: true
+    num_workers: 0
+    drop_last: false
+    pin_memory: true
+    validate: true
+    weighted_sampling: true
+    cutoff_date: "2021-09-30"
+    crop_size: 384
+    crop_mode: weighted
+    max_entries: null
+    max_rows: null
+    seed: 0
+    bb_only: true
+    max_cache_gb: 256
+    cache_cleanup_interval: 128
+    drop_bond_mask: true
+  sequence_conditioning_mode: scheduler
+  gradient_clip_norm: 10.0
+  ema_decay: 0.999
+  optimizer:
+    lr: 0.00018
+    betas: [0.9, 0.95]
+    weight_decay: 1e-8
+  scheduler:
+    warmup_steps: 1000
+    decay_factor: 0.95
+    decay_every_n_steps: 50000
+  loss_weights:
+    sequence: 1.0
+    mse: 4.0
+    smooth_lddt: 4.0
+    distogram: 0.03

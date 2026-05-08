@@ -252,8 +252,38 @@ uv run python -m disco.training.preprocess \
   --crop-size 384
 ```
 
-Process the downloaded Protenix/PDB archive with the paper reconstruction
-settings:
+The raw Protenix archive is large enough to use directly. Fully materializing
+crop-384 `.pt` examples is not recommended on the current archive volume: a
+small sample averaged about 22 MiB per crop, which projects to multiple TiB for
+the full train split. Prefer the streaming Protenix dataloader with a bounded
+cache:
+
+```bash
+CUDA_VISIBLE_DEVICES= uv run python runner/train.py \
+  training=streaming_protenix \
+  training.dataloader.batch_size=2
+```
+
+For a small CPU smoke check:
+
+```bash
+CUDA_VISIBLE_DEVICES= uv run python runner/train.py \
+  training=streaming_protenix \
+  experiment=train_smoke \
+  logger=csv \
+  training.dataloader.batch_size=2 \
+  training.dataloader.max_entries=8 \
+  training.dataloader.crop_size=32 \
+  training.dataloader.cache_dir=/tmp/disco_stream_train_cache \
+  training.dataloader.max_cache_gb=0.05
+```
+
+This reads Protenix's filtered `before_2021-09-30_res4.5` index, samples
+chain/interface rows with cluster-aware weights, builds paper-style crops on
+demand, drops the currently-unused dense `bond_mask`, and keeps only generated
+crops in the configured LRU cache.
+
+The older fully materialized path is still available for small subsets:
 
 ```bash
 uv run python -m disco.training.pdb_dataset \
@@ -275,7 +305,8 @@ index, the processor falls back to discovering structures directly, applying
 the 2021-09-30 deposition cutoff, and using identical-sequence clusters from
 `pdb_seqres.txt.gz` or a file passed with `--cluster-file`.
 
-Run a one-step CPU smoke check with a small PLM and disabled structure encoder:
+Run a one-step CPU smoke check for a materialized manifest with a small PLM and
+disabled structure encoder:
 
 ```bash
 CUDA_VISIBLE_DEVICES= uv run python runner/train.py \

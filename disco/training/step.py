@@ -94,9 +94,12 @@ def _valid_sequence_mask(
 
     protein_valid = torch.zeros_like(valid)
     for batch_idx in range(valid.shape[0]):
-        sample_valid = token_valid[batch_idx][
-            prot_residue_mask[batch_idx].to(device=true_seq.device, dtype=torch.bool)
-        ]
+        if token_valid.shape[-1] == prot_residue_mask.shape[-1]:
+            sample_valid = token_valid[batch_idx][
+                prot_residue_mask[batch_idx].to(device=true_seq.device, dtype=torch.bool)
+            ]
+        else:
+            sample_valid = token_valid[batch_idx]
         n = min(sample_valid.shape[0], protein_valid.shape[-1])
         protein_valid[batch_idx, :n] = sample_valid[:n]
     return valid & protein_valid

@@ -71,6 +71,7 @@ class ProtenixIndexRow:
     chain_ids: tuple[str, ...]
     cluster_id: str
     deposition_date: str | None
+    approx_tokens: int = 1
 
 
 def _entry_id_from_path(path: Path) -> str:
@@ -273,6 +274,7 @@ def _read_protenix_index(
                 chain_ids=chain_ids,
                 cluster_id=cluster_id,
                 deposition_date=deposition_date,
+                approx_tokens=int(row.get("num_tokens") or 1),
             )
             entry_rows.setdefault(entry_id, []).append(index_row)
             cluster_counts[cluster_id] = cluster_counts.get(cluster_id, 0) + 1
