@@ -19,6 +19,9 @@ blocks_per_ckpt: 1 # Number of blocks in each activation checkpoint, if None, no
 use_memory_efficient_kernel: false
 use_deepspeed_evo_attention: true
 use_lma: false
+normal_attention:
+  use_sdpa: true
+  sdpa_backend: efficient # flash currently rejects additive pair-bias masks in PyTorch SDPA
 dtype: "bf16"
 skip_amp:
   sample_diffusion: true
@@ -63,6 +66,7 @@ model:
     blocks_per_ckpt: ${blocks_per_ckpt}
     transition_chunk_size: null
     fuse_transition_gating: false
+    attention: ${normal_attention}
   diffusion_module:
     use_fine_grained_checkpoint: true
     do_fourier_embed_seq: true
@@ -94,6 +98,7 @@ model:
       n_blocks: 3
       n_heads: 4
     blocks_per_ckpt: ${blocks_per_ckpt}
+    attention: ${normal_attention}
   distogram_head:
     c_z: ${c_z}
     no_bins: ${no_bins}
