@@ -33,6 +33,14 @@ from disco.model.modules.transformer import AttentionPairBias
 logger = logging.getLogger(__name__)
 
 
+def _attention_kwargs(attention: dict | None = None) -> dict:
+    attention = attention or {}
+    return {
+        "use_efficient_implementation": attention.get("use_sdpa", True),
+        "sdpa_backend": attention.get("sdpa_backend", "efficient"),
+    }
+
+
 class PairformerBlock(nn.Module):
     """Implements Algorithm 17 [Line2-Line8] in AF3.
     c_hidden_mul is set as openfold
@@ -59,6 +67,7 @@ class PairformerBlock(nn.Module):
         c_hidden_pair_att: int = 32,
         no_heads_pair: int = 4,
         dropout: float = 0.25,
+        attention: dict | None = None,
     ) -> None:
         super().__init__()
         self.n_heads = n_heads
@@ -81,7 +90,11 @@ class PairformerBlock(nn.Module):
         self.c_s = c_s
         if self.c_s > 0:
             self.attention_pair_bias = AttentionPairBias(
-                has_s=False, n_heads=n_heads, c_a=c_s, c_z=c_z
+                has_s=False,
+                n_heads=n_heads,
+                c_a=c_s,
+                c_z=c_z,
+                **_attention_kwargs(attention),
             )
             self.single_transition = Transition(c_in=c_s, n=4)
 
@@ -223,6 +236,7 @@ class PairformerStack(nn.Module):
         c_s: int = 384,
         dropout: float = 0.25,
         blocks_per_ckpt: int | None = None,
+        attention: dict | None = None,
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
@@ -234,7 +248,13 @@ class PairformerStack(nn.Module):
         self.blocks = nn.ModuleList()
 
         for _ in range(n_blocks):
-            block = PairformerBlock(n_heads=n_heads, c_z=c_z, c_s=c_s, dropout=dropout)
+            block = PairformerBlock(
+                n_heads=n_heads,
+                c_z=c_z,
+                c_s=c_s,
+                dropout=dropout,
+                attention=attention,
+            )
             self.blocks.append(block)
 
     def _prep_blocks(

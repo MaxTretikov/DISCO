@@ -47,6 +47,10 @@ training:
     muon_ns_steps: 5
     muon_adjust_lr_fn: match_rms_adamw
     muon_weight_decay: 1e-8
+  fp8:
+    enabled: false
+    backend: transformer_engine
+    replace_linear: true
   scheduler:
     warmup_steps: 1000
     decay_factor: 0.95

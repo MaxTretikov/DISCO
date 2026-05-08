@@ -250,6 +250,7 @@ class DiffusionModule(nn.Module):
         blocks_per_ckpt: int | None = None,
         use_fine_grained_checkpoint: bool = False,
         initialization: dict[str, str | float | bool] | None = None,
+        attention: dict | None = None,
         do_fourier_embed_seq: bool = False,
         do_lm_skip_connection: bool = False,
         call_super_init: bool = True,
@@ -285,6 +286,7 @@ class DiffusionModule(nn.Module):
             c_s=c_s,
             c_z=c_z,
             blocks_per_ckpt=blocks_per_ckpt,
+            attention=attention,
         )
         # Alg20: line4
         self.layernorm_s = LayerNorm(c_s)
@@ -303,6 +305,7 @@ class DiffusionModule(nn.Module):
             c_s=c_s,
             c_z=c_z,
             blocks_per_ckpt=blocks_per_ckpt,
+            attention=attention,
         )
         self.layernorm_a = LayerNorm(c_token)
         self.atom_attention_decoder = AtomAttentionDecoder(
@@ -312,6 +315,7 @@ class DiffusionModule(nn.Module):
             c_atompair=c_atompair,
             c_s=c_s,
             blocks_per_ckpt=blocks_per_ckpt,
+            attention=attention,
         )
 
         if initialization is not None:
@@ -668,6 +672,7 @@ class JointDiffusionModule(DiffusionModule):
         do_fourier_embed_seq: bool = False,
         do_lm_skip_connection: bool = False,
         initialization: dict[str, str | float | bool] | None = None,
+        attention: dict | None = None,
     ) -> None:
         nn.Module.__init__(self)
 
@@ -683,6 +688,7 @@ class JointDiffusionModule(DiffusionModule):
             c_atompair=c_atompair,
             c_s=c_s,
             blocks_per_ckpt=blocks_per_ckpt,
+            attention=attention,
         )
 
         super().__init__(
@@ -699,6 +705,7 @@ class JointDiffusionModule(DiffusionModule):
             blocks_per_ckpt=blocks_per_ckpt,
             use_fine_grained_checkpoint=use_fine_grained_checkpoint,
             initialization=initialization,
+            attention=attention,
             do_fourier_embed_seq=do_fourier_embed_seq,
             do_lm_skip_connection=do_lm_skip_connection,
             call_super_init=False,

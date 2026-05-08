@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import math
+from contextlib import nullcontext
 from functools import partial
 
 import torch
@@ -22,6 +23,7 @@ import torch.nn.functional as F
 from openfold.model.primitives import LayerNorm
 from openfold.utils.chunk_utils import chunk_layer
 from torch.nn import Linear
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from disco.model.utils import (
     flatten_final_dims,
@@ -31,6 +33,80 @@ from disco.model.utils import (
 )
 
 LinearNoBias = partial(Linear, bias=False)
+
+_SDPA_BACKENDS = {
+    "flash": SDPBackend.FLASH_ATTENTION,
+    "efficient": SDPBackend.EFFICIENT_ATTENTION,
+    "mem_efficient": SDPBackend.EFFICIENT_ATTENTION,
+    "cudnn": SDPBackend.CUDNN_ATTENTION,
+    "math": SDPBackend.MATH,
+}
+
+
+def _sdpa_backend_context(sdpa_backend: str | None, q: torch.Tensor):
+    """Optionally force a CUDA SDPA backend for profiling experiments."""
+    if sdpa_backend is None or sdpa_backend == "auto" or not q.is_cuda:
+        return nullcontext()
+
+    if sdpa_backend not in _SDPA_BACKENDS:
+        raise ValueError(
+            "sdpa_backend must be one of "
+            f"{sorted([*_SDPA_BACKENDS.keys(), 'auto'])}; got {sdpa_backend!r}."
+        )
+    return sdpa_kernel(_SDPA_BACKENDS[sdpa_backend], set_priority=True)
+
+
+def _scaled_dot_product_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_bias: torch.Tensor | None,
+    sdpa_backend: str | None,
+    attn_weight_dropout_p: float,
+) -> torch.Tensor:
+    # Fused CUDA SDPA kernels in this PyTorch build require 4D q/k/v. DISCO's
+    # local atom attention carries extra trunk dimensions, which are independent
+    # batch axes and can be flattened without changing attention semantics.
+    if q.dim() > 4:
+        q_shape = q.shape
+        k_shape = k.shape
+        v_shape = v.shape
+        q_batch_shape = q_shape[:-2]
+        if k_shape[:-2] != q_batch_shape or v_shape[:-2] != q_batch_shape:
+            raise ValueError("q, k, and v must have matching leading dimensions.")
+
+        q = q.reshape(-1, 1, q_shape[-2], q_shape[-1])
+        k = k.reshape(-1, 1, k_shape[-2], k_shape[-1])
+        v = v.reshape(-1, 1, v_shape[-2], v_shape[-1])
+        if attn_bias is not None:
+            attn_bias = torch.broadcast_to(
+                attn_bias,
+                (*q_batch_shape, q_shape[-2], k_shape[-2]),
+            ).reshape(-1, 1, q_shape[-2], k_shape[-2])
+            attn_bias = attn_bias.contiguous()
+        with _sdpa_backend_context(sdpa_backend, q):
+            out = F.scaled_dot_product_attention(
+                query=q,
+                key=k,
+                value=v,
+                attn_mask=attn_bias,
+                dropout_p=attn_weight_dropout_p,
+                scale=1.0,
+            )
+        return out.reshape(*q_batch_shape, q_shape[-2], v_shape[-1])
+
+    if attn_bias is not None:
+        attn_bias = attn_bias.contiguous()
+
+    with _sdpa_backend_context(sdpa_backend, q):
+        return F.scaled_dot_product_attention(
+            query=q,
+            key=k,
+            value=v,
+            attn_mask=attn_bias,
+            dropout_p=attn_weight_dropout_p,
+            scale=1.0,
+        )
 
 
 class AdaptiveLayerNorm(nn.Module):
@@ -167,6 +243,7 @@ def _attention(
     v: torch.Tensor,
     attn_bias: torch.Tensor | None = None,
     use_efficient_implementation: bool = False,
+    sdpa_backend: str | None = "auto",
     attn_weight_dropout_p: float = 0.0,
     inplace_safe: bool = False,
 ) -> torch.Tensor:
@@ -185,14 +262,14 @@ def _attention(
     """
     assert k.shape == v.shape
     if use_efficient_implementation:
-        attn_output = F.scaled_dot_product_attention(
-            query=q,
-            key=k,
-            value=v,
-            attn_mask=attn_bias,
-            dropout_p=attn_weight_dropout_p,
+        return _scaled_dot_product_attention(
+            q=q,
+            k=k,
+            v=v,
+            attn_bias=attn_bias,
+            sdpa_backend=sdpa_backend,
+            attn_weight_dropout_p=attn_weight_dropout_p,
         )
-        return attn_output
     # [..., n_kv, d] -> [..., d, n_kv]
     k = k.transpose(-1, -2)
 
@@ -436,6 +513,7 @@ def _local_attention(
     trunked_attn_bias: torch.Tensor | None = None,
     inf: float = 1e10,
     use_efficient_implementation: bool = False,
+    sdpa_backend: str | None = "auto",
     attn_weight_dropout_p: float = 0.0,
     inplace_safe: bool = False,
     chunk_size: int | None = None,
@@ -502,6 +580,7 @@ def _local_attention(
             partial(
                 _attention,
                 use_efficient_implementation=use_efficient_implementation,
+                sdpa_backend=sdpa_backend,
                 attn_weight_dropout_p=attn_weight_dropout_p,
                 inplace_safe=inplace_safe,
             ),
@@ -517,6 +596,7 @@ def _local_attention(
             v=v_trunked,
             attn_bias=attn_bias_trunked,
             use_efficient_implementation=use_efficient_implementation,
+            sdpa_backend=sdpa_backend,
             attn_weight_dropout_p=attn_weight_dropout_p,
             inplace_safe=inplace_safe,
         )
@@ -600,7 +680,8 @@ class Attention(nn.Module):
         gating: bool = True,
         q_linear_bias: bool = False,
         local_attention_method: str = "global_attention_with_bias",
-        use_efficient_implementation: bool = False,
+        use_efficient_implementation: bool = True,
+        sdpa_backend: str | None = "efficient",
         attn_weight_dropout_p: float = 0.0,
     ) -> None:
         super().__init__()
@@ -612,6 +693,7 @@ class Attention(nn.Module):
         self.gating = gating
         self.local_attention_method = local_attention_method
         self.use_efficient_implementation = use_efficient_implementation
+        self.sdpa_backend = sdpa_backend
         self.attn_weight_dropout_p = attn_weight_dropout_p
 
         # DISCREPANCY: c_hidden is not the per-head channel dimension, as
@@ -773,6 +855,7 @@ class Attention(nn.Module):
                     v=v,
                     attn_bias=local_attn_bias,
                     use_efficient_implementation=self.use_efficient_implementation,
+                    sdpa_backend=self.sdpa_backend,
                     attn_weight_dropout_p=self.attn_weight_dropout_p,
                     inplace_safe=inplace_safe,
                 )
@@ -788,6 +871,7 @@ class Attention(nn.Module):
                     trunked_attn_bias=trunked_attn_bias,
                     inf=inf,
                     use_efficient_implementation=self.use_efficient_implementation,
+                    sdpa_backend=self.sdpa_backend,
                     attn_weight_dropout_p=self.attn_weight_dropout_p,
                     inplace_safe=inplace_safe,
                     chunk_size=chunk_size,
@@ -803,6 +887,7 @@ class Attention(nn.Module):
                 v=v,
                 attn_bias=attn_bias,
                 use_efficient_implementation=self.use_efficient_implementation,
+                sdpa_backend=self.sdpa_backend,
                 attn_weight_dropout_p=self.attn_weight_dropout_p,
                 inplace_safe=inplace_safe,
             )  # [*, H, Q, C_hidden]

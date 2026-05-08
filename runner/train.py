@@ -126,7 +126,63 @@ class TrainRunner:
             structure_encoder,
             sequence_sampling_strategy,
         )
+        self.validate_normal_attention_config()
         self.validate_fp4_training_config()
+        self.validate_fp8_training_config()
+        self.replace_linear_with_transformer_engine_if_requested()
+
+    def validate_normal_attention_config(self) -> None:
+        attn_cfg = self.configs.get("normal_attention", {})
+        if not attn_cfg.get("use_sdpa", True):
+            return
+
+        backend = attn_cfg.get("sdpa_backend", "efficient")
+        valid_backends = {
+            "auto",
+            "flash",
+            "efficient",
+            "mem_efficient",
+            "cudnn",
+            "math",
+        }
+        if backend not in valid_backends:
+            raise ValueError(
+                "normal_attention.sdpa_backend must be one of "
+                f"{sorted(valid_backends)}."
+            )
+
+        if backend == "flash" and torch.cuda.is_available():
+            q = torch.randn(
+                1,
+                1,
+                8,
+                16,
+                device=self.device,
+                dtype=(
+                    torch.bfloat16
+                    if torch.cuda.is_bf16_supported()
+                    else torch.float16
+                ),
+            )
+            bias = torch.zeros(1, 1, 8, 8, device=self.device, dtype=q.dtype)
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+
+            try:
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION, set_priority=True):
+                    torch.nn.functional.scaled_dot_product_attention(
+                        q,
+                        q,
+                        q,
+                        attn_mask=bias,
+                        scale=1.0,
+                    )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "normal_attention.sdpa_backend=flash is not usable for DISCO's "
+                    "normal attention on this PyTorch build because the attention "
+                    "calls include additive pair-bias masks. Use "
+                    "normal_attention.sdpa_backend=efficient or auto."
+                ) from exc
 
     def validate_fp4_training_config(self) -> None:
         fp4_cfg = self.configs.training.get("fp4", None)
@@ -160,6 +216,82 @@ class TrainRunner:
             "FP4 module wrapping is not wired yet. The config gate is present so "
             "NVFP4/MXFP4 runs fail before model construction on unsupported setups."
         )
+
+    def validate_fp8_training_config(self) -> None:
+        fp8_cfg = self.configs.training.get("fp8", None)
+        if fp8_cfg is None or not fp8_cfg.get("enabled", False):
+            return
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("FP8 training requires a CUDA GPU.")
+
+        backend = fp8_cfg.get("backend", "transformer_engine")
+        if backend != "transformer_engine":
+            raise ValueError(
+                "training.fp8.backend currently supports only 'transformer_engine'."
+            )
+        if find_spec("transformer_engine") is None:
+            raise ImportError(
+                "training.fp8.enabled=true requires transformer_engine to be installed."
+            )
+
+    def replace_linear_with_transformer_engine_if_requested(self) -> None:
+        fp8_cfg = self.configs.training.get("fp8", None)
+        if fp8_cfg is None or not fp8_cfg.get("enabled", False):
+            return
+        if not fp8_cfg.get("replace_linear", True):
+            return
+
+        import transformer_engine.pytorch as te
+
+        def make_linear(module: torch.nn.Linear) -> torch.nn.Module:
+            try:
+                te_linear = te.Linear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                    params_dtype=module.weight.dtype,
+                )
+            except TypeError:
+                te_linear = te.Linear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                )
+            te_linear = te_linear.to(
+                device=module.weight.device,
+                dtype=module.weight.dtype,
+            )
+            te_linear.weight.data.copy_(module.weight.data)
+            te_linear.weight.requires_grad_(module.weight.requires_grad)
+            if module.bias is not None:
+                te_linear.bias.data.copy_(module.bias.data)
+                te_linear.bias.requires_grad_(module.bias.requires_grad)
+            return te_linear
+
+        def replace_children(parent: torch.nn.Module) -> int:
+            replacements = 0
+            for name, child in list(parent.named_children()):
+                if isinstance(child, torch.nn.Linear):
+                    setattr(parent, name, make_linear(child))
+                    replacements += 1
+                else:
+                    replacements += replace_children(child)
+            return replacements
+
+        replacements = replace_children(self.model)
+        logger.info(
+            "Replaced %d torch.nn.Linear modules with TransformerEngine Linear.",
+            replacements,
+        )
+
+    def fp8_autocast_context(self):
+        fp8_cfg = self.configs.training.get("fp8", None)
+        if fp8_cfg is None or not fp8_cfg.get("enabled", False):
+            return nullcontext()
+        import transformer_engine.pytorch as te
+
+        return te.fp8_autocast(enabled=True)
 
     def cast_trainable_parameters(self, dtype: torch.dtype) -> None:
         for parameter in self.model.parameters():
@@ -388,7 +520,7 @@ class TrainRunner:
                     else nullcontext()
                 )
 
-                with enable_amp:
+                with enable_amp, self.fp8_autocast_context():
                     loss, log_dict = compute_training_loss(
                         self.model,
                         batch,

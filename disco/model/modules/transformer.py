@@ -37,6 +37,14 @@ from disco.model.utils import (
 )
 
 
+def _attention_kwargs(attention: dict | None = None) -> dict:
+    attention = attention or {}
+    return {
+        "use_efficient_implementation": attention.get("use_sdpa", True),
+        "sdpa_backend": attention.get("sdpa_backend", "efficient"),
+    }
+
+
 class AttentionPairBias(nn.Module):
     """Implements Algorithm 24 in AF3
 
@@ -57,6 +65,8 @@ class AttentionPairBias(nn.Module):
         c_s: int = 384,
         c_z: int = 128,
         biasinit: float = -2.0,
+        use_efficient_implementation: bool = True,
+        sdpa_backend: str | None = "efficient",
     ) -> None:
         super().__init__()
         assert c_a % n_heads == 0
@@ -82,6 +92,8 @@ class AttentionPairBias(nn.Module):
             gating=True,
             q_linear_bias=True,
             local_attention_method=self.local_attention_method,
+            use_efficient_implementation=use_efficient_implementation,
+            sdpa_backend=sdpa_backend,
         )
         self.layernorm_z = LayerNorm(c_z)
         # Alg24. Line8 is scalar, but this is different for different heads
@@ -240,6 +252,7 @@ class DiffusionTransformerBlock(nn.Module):
         c_z: int,  # could be c_z or c_atompair
         n_heads: int,  # could be 16 or 4 or ... in AF3
         biasinit: float = -2.0,
+        attention: dict | None = None,
     ) -> None:
         super().__init__()
         self.n_heads = n_heads
@@ -247,7 +260,13 @@ class DiffusionTransformerBlock(nn.Module):
         self.c_s = c_s
         self.c_z = c_z
         self.attention_pair_bias = AttentionPairBias(
-            has_s=True, n_heads=n_heads, c_a=c_a, c_s=c_s, c_z=c_z, biasinit=biasinit
+            has_s=True,
+            n_heads=n_heads,
+            c_a=c_a,
+            c_s=c_s,
+            c_z=c_z,
+            biasinit=biasinit,
+            **_attention_kwargs(attention),
         )
         self.conditioned_transition_block = ConditionedTransitionBlock(
             n=2, c_a=c_a, c_s=c_s, biasinit=biasinit
@@ -319,6 +338,7 @@ class DiffusionTransformer(nn.Module):
         n_blocks: int,  # could be 3 or 24 in AF3
         n_heads: int,  # could be 16 or 4 or ... in AF3
         blocks_per_ckpt: int | None = None,
+        attention: dict | None = None,
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
@@ -331,7 +351,11 @@ class DiffusionTransformer(nn.Module):
         self.blocks = nn.ModuleList()
         for _ in range(n_blocks):
             block = DiffusionTransformerBlock(
-                n_heads=n_heads, c_a=c_a, c_s=c_s, c_z=c_z
+                n_heads=n_heads,
+                c_a=c_a,
+                c_s=c_s,
+                c_z=c_z,
+                attention=attention,
             )
             self.blocks.append(block)
 
@@ -435,6 +459,7 @@ class AtomTransformer(nn.Module):
         n_queries: int = 32,
         n_keys: int = 128,
         blocks_per_ckpt: int | None = None,
+        attention: dict | None = None,
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
@@ -450,6 +475,7 @@ class AtomTransformer(nn.Module):
             c_s=c_atom,
             c_z=c_atompair,
             blocks_per_ckpt=blocks_per_ckpt,
+            attention=attention,
         )
 
     def forward(
@@ -560,6 +586,7 @@ class AtomAttentionEncoder(nn.Module):
         n_queries: int = 32,
         n_keys: int = 128,
         blocks_per_ckpt: int | None = None,
+        attention: dict | None = None,
     ) -> None:
         super().__init__()
         self.has_coords = has_coords
@@ -629,6 +656,7 @@ class AtomAttentionEncoder(nn.Module):
             n_queries=n_queries,
             n_keys=n_keys,
             blocks_per_ckpt=blocks_per_ckpt,
+            attention=attention,
         )
         self.linear_no_bias_q = LinearNoBias(
             in_features=self.c_atom, out_features=self.c_token
@@ -897,6 +925,7 @@ class AtomAttentionDecoder(nn.Module):
         c_s: int = 384,
         blocks_per_ckpt: int | None = None,
         is_seq_decoder: bool = False,
+        attention: dict | None = None,
     ) -> None:
         super().__init__()
         self.n_blocks = n_blocks
@@ -923,6 +952,7 @@ class AtomAttentionDecoder(nn.Module):
             n_queries=n_queries,
             n_keys=n_keys,
             blocks_per_ckpt=blocks_per_ckpt,
+            attention=attention,
         )
 
     def forward(
