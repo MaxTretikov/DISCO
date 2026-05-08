@@ -104,10 +104,16 @@ class Transition(nn.Module):
         n (int, optional): factor by which c_in is multiplied to obtain hidden dimension.
     """
 
-    def __init__(self, c_in: int, n: int) -> None:
+    def __init__(
+        self,
+        c_in: int,
+        n: int,
+        fuse_gated_activation: bool = False,
+    ) -> None:
         super().__init__()
         self.n = n
         self.c_in = c_in
+        self.fuse_gated_activation = fuse_gated_activation
         self.layernorm1 = LayerNorm(c_in)
         self.linear_no_bias_a = LinearNoBias(in_features=c_in, out_features=n * c_in)
         self.linear_no_bias_b = LinearNoBias(in_features=c_in, out_features=n * c_in)
@@ -158,6 +164,11 @@ class Transition(nn.Module):
         if self.training:
             x = self.layernorm1(x)
             a = self.linear_no_bias_a(x)
+            if self.fuse_gated_activation:
+                a = F.silu(a, inplace=True)
+                b = self.linear_no_bias_b(x)
+                b *= a
+                return self.linear_no_bias(b)
             b = self.linear_no_bias_b(x)
             x = self.linear_no_bias(F.silu(a) * b)
             return x
