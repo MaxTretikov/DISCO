@@ -109,15 +109,9 @@ class InferenceRunner:
         torch.cuda.set_device(self.device)
         os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.0;8.9")
         if self.configs.use_deepspeed_evo_attention:
-            env = os.getenv("CUTLASS_PATH", None)
-            self.print(f"env: {env}")
-            assert (
-                env is not None
-            ), "if use ds4sci, set env as https://www.deepspeed.ai/tutorials/ds4sci_evoformerattention/"
-            if env is not None:
-                logging.info(
-                    "The kernels will be compiled when DS4Sci_EvoformerAttention is called for the first time."
-                )
+            logging.info(
+                "The kernels will be compiled when DS4Sci_EvoformerAttention is called for the first time."
+            )
         use_fastlayernorm = os.getenv("LAYERNORM_TYPE", None)
         if use_fastlayernorm == "fast_layernorm":
             logging.info(

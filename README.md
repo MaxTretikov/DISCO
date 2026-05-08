@@ -62,24 +62,18 @@ source .venv/bin/activate
 
 By default, DISCO uses [DeepSpeed4Science EvoformerAttention](https://www.deepspeed.ai/tutorials/ds4sci_evoformerattention/) for memory-efficient attention, which significantly reduces GPU memory usage and enables inference on longer sequences. This requires [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) to be available on disk and a GPU with **Ampere or newer architecture** (e.g. A100, L40S, H100, H200, B100, B200).
 
-To set it up, clone the CUTLASS repository and set the `CUTLASS_PATH` environment variable:
+To set it up, clone the CUTLASS repository. The pinned DeepSpeed fork searches
+common local install paths automatically, and `CUTLASS_PATH` can still be used as
+an explicit override:
 
 ```bash
 git clone https://github.com/NVIDIA/cutlass.git /path/to/cutlass
 export CUTLASS_PATH=/path/to/cutlass
 ```
 
-Before running with DeepSpeed Evoformer attention, validate the local environment:
-
-```bash
-uv run python runner/preflight_ds4sci.py
-```
-
-The preflight checks common CUTLASS install locations, validates the headers/version,
-runs DeepSpeed's Evoformer op compatibility check, and prints the `CUTLASS_PATH` and
-`TORCH_CUDA_ARCH_LIST` exports to use.
-
-You can add `CUTLASS_PATH` to your shell profile so it persists across sessions. The attention kernels will be compiled the first time they are invoked.
+You can add `CUTLASS_PATH` to your shell profile if you want to force a specific
+CUTLASS checkout. The attention kernels will be compiled the first time they are
+invoked.
 
 If you prefer to skip the CUTLASS installation, disable DeepSpeed attention on the command line:
 

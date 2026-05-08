@@ -53,6 +53,7 @@ members = ["packages/LigandMPNN", "packages/openfold", "config", "runner"]
 exclude = ["packages/TMscore"]
 
 [tool.uv.sources]
+deepspeed = { git = "https://github.com/MaxTretikov/DeepSpeed", rev = "56d19b707375456fb307544257bc1cc86abb8aa7" }
 openfold = { workspace = true }
 LigandMPNN = { workspace = true }
 configs = { workspace = true }
