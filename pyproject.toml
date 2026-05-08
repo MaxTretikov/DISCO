@@ -47,6 +47,7 @@ dependencies = [
     "openfold",
     "LigandMPNN",
     "runner",
+    "flashoptim>=0.1.4",
 ]
 [tool.uv.workspace]
 members = ["packages/LigandMPNN", "packages/openfold", "config", "runner"]

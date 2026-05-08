@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 import os
 from collections import OrderedDict
+from collections.abc import Sequence
 from contextlib import nullcontext
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -40,13 +42,15 @@ class WarmupStepDecay:
 
     def __init__(
         self,
-        optimizer: torch.optim.Optimizer,
+        optimizer: torch.optim.Optimizer | Sequence[torch.optim.Optimizer],
         base_lr: float,
         warmup_steps: int,
         decay_factor: float,
         decay_every_n_steps: int,
     ) -> None:
-        self.optimizer = optimizer
+        self.optimizers = (
+            list(optimizer) if isinstance(optimizer, Sequence) else [optimizer]
+        )
         self.base_lr = base_lr
         self.warmup_steps = warmup_steps
         self.decay_factor = decay_factor
@@ -59,8 +63,9 @@ class WarmupStepDecay:
             decay_steps = (step - self.warmup_steps) // self.decay_every_n_steps
             lr = self.base_lr * (self.decay_factor**decay_steps)
 
-        for group in self.optimizer.param_groups:
-            group["lr"] = lr
+        for optimizer in self.optimizers:
+            for group in optimizer.param_groups:
+                group["lr"] = lr
         return lr
 
 
@@ -121,24 +126,149 @@ class TrainRunner:
             structure_encoder,
             sequence_sampling_strategy,
         )
+        self.validate_fp4_training_config()
+
+    def validate_fp4_training_config(self) -> None:
+        fp4_cfg = self.configs.training.get("fp4", None)
+        if fp4_cfg is None or not fp4_cfg.get("enabled", False):
+            return
+
+        fp4_format = fp4_cfg.get("format", "nvfp4")
+        if fp4_format not in {"nvfp4", "mxfp4"}:
+            raise ValueError("training.fp4.format must be 'nvfp4' or 'mxfp4'.")
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("FP4 training requires a CUDA GPU.")
+
+        capability = torch.cuda.get_device_capability(self.device)
+        if capability[0] < 10:
+            device_name = torch.cuda.get_device_name(self.device)
+            raise RuntimeError(
+                f"{fp4_format.upper()} training needs Blackwell-class native FP4 "
+                f"support; current GPU is {device_name} with sm_{capability[0]}"
+                f"{capability[1]}."
+            )
+
+        backend = fp4_cfg.get("backend", "transformer_engine")
+        if backend != "transformer_engine":
+            raise ValueError("training.fp4.backend currently supports only 'transformer_engine'.")
+        if find_spec("transformer_engine") is None:
+            raise ImportError(
+                "training.fp4.enabled=true requires transformer_engine to be installed."
+            )
+        raise NotImplementedError(
+            "FP4 module wrapping is not wired yet. The config gate is present so "
+            "NVFP4/MXFP4 runs fail before model construction on unsupported setups."
+        )
+
+    def cast_trainable_parameters(self, dtype: torch.dtype) -> None:
+        for parameter in self.model.parameters():
+            if parameter.requires_grad:
+                parameter.data = parameter.data.to(dtype=dtype)
+
+    def split_muon_parameters(
+        self,
+    ) -> tuple[list[tuple[str, torch.nn.Parameter]], list[torch.nn.Parameter]]:
+        muon_params = []
+        adam_params = []
+        for name, parameter in self.model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if parameter.ndim == 2 and "embed" not in name.lower():
+                muon_params.append((name, parameter))
+            else:
+                adam_params.append(parameter)
+        return muon_params, adam_params
 
     def init_optimizer(self) -> None:
         opt_cfg = self.configs.training.optimizer
+        optimizer_name = opt_cfg.get("name", "adam")
+        cast_model_dtype = opt_cfg.get("cast_model_dtype")
+        if cast_model_dtype is not None:
+            if cast_model_dtype not in {"bf16", "fp16", "fp32"}:
+                raise ValueError(
+                    "training.optimizer.cast_model_dtype must be one of "
+                    "null, 'bf16', 'fp16', or 'fp32'."
+                )
+            dtype = {
+                "bf16": torch.bfloat16,
+                "fp16": torch.float16,
+                "fp32": torch.float32,
+            }[cast_model_dtype]
+            self.cast_trainable_parameters(dtype)
+
         params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = torch.optim.Adam(
-            params,
-            lr=opt_cfg.lr,
-            betas=tuple(opt_cfg.betas),
-            weight_decay=opt_cfg.weight_decay,
-        )
+        if optimizer_name == "adam":
+            self.optimizer = torch.optim.Adam(
+                params,
+                lr=opt_cfg.lr,
+                betas=tuple(opt_cfg.betas),
+                weight_decay=opt_cfg.weight_decay,
+            )
+            self.optimizers = [self.optimizer]
+        elif optimizer_name in {"flash_adam", "flash_adamw"}:
+            from flashoptim import FlashAdam, FlashAdamW
+
+            optimizer_cls = FlashAdam if optimizer_name == "flash_adam" else FlashAdamW
+            self.optimizer = optimizer_cls(
+                params,
+                lr=opt_cfg.lr,
+                betas=tuple(opt_cfg.betas),
+                weight_decay=opt_cfg.weight_decay,
+                quantize=opt_cfg.get("quantize", True),
+                compress_state_dict=opt_cfg.get("compress_state_dict", True),
+                master_weight_bits=opt_cfg.get("master_weight_bits", 24),
+                fused=opt_cfg.get("fused", True),
+            )
+            self.optimizers = [self.optimizer]
+        elif optimizer_name == "muon":
+            from flashoptim import FlashAdam
+
+            muon_params, adam_params = self.split_muon_parameters()
+            if not muon_params:
+                raise ValueError("Muon optimizer selected, but no 2D trainable params found.")
+            logger.info(
+                "Using Muon for %.2fM parameters and FlashAdam for %.2fM parameters.",
+                sum(parameter.numel() for _, parameter in muon_params) / 1_000_000,
+                sum(parameter.numel() for parameter in adam_params) / 1_000_000,
+            )
+            self.optimizer = torch.optim.Muon(
+                muon_params,
+                lr=opt_cfg.lr,
+                weight_decay=opt_cfg.get("muon_weight_decay", opt_cfg.weight_decay),
+                momentum=opt_cfg.get("muon_momentum", 0.95),
+                nesterov=opt_cfg.get("muon_nesterov", True),
+                ns_steps=opt_cfg.get("muon_ns_steps", 5),
+                adjust_lr_fn=opt_cfg.get("muon_adjust_lr_fn", "match_rms_adamw"),
+            )
+            self.adam_optimizer = FlashAdam(
+                adam_params,
+                lr=opt_cfg.lr,
+                betas=tuple(opt_cfg.betas),
+                weight_decay=opt_cfg.weight_decay,
+                quantize=opt_cfg.get("quantize", True),
+                compress_state_dict=opt_cfg.get("compress_state_dict", True),
+                master_weight_bits=opt_cfg.get("master_weight_bits", 24),
+                fused=opt_cfg.get("fused", True),
+            )
+            self.optimizers = [self.optimizer, self.adam_optimizer]
+        else:
+            raise ValueError(
+                "training.optimizer.name must be one of 'adam', 'flash_adam', "
+                "'flash_adamw', or 'muon'."
+            )
         self.scheduler = WarmupStepDecay(
-            optimizer=self.optimizer,
+            optimizer=self.optimizers,
             base_lr=opt_cfg.lr,
             warmup_steps=self.configs.training.scheduler.warmup_steps,
             decay_factor=self.configs.training.scheduler.decay_factor,
             decay_every_n_steps=self.configs.training.scheduler.decay_every_n_steps,
         )
-        self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
+        setup_outputs = self.fabric.setup(self.model, *self.optimizers)
+        self.model = setup_outputs[0]
+        self.optimizers = list(setup_outputs[1:])
+        self.optimizer = self.optimizers[0]
+        self.scheduler.optimizers = self.optimizers
         self.ema = ModelEma(self.model, decay=self.configs.training.ema_decay)
 
     def init_dataloader(self) -> None:
@@ -175,8 +305,25 @@ class TrainRunner:
             strict=self.configs.load_strict,
         )
 
-        if "optimizer" in checkpoint:
-            self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if "optimizers" in checkpoint:
+            optimizer_states = checkpoint["optimizers"]
+            if len(optimizer_states) != len(self.optimizers):
+                logger.warning(
+                    "Skipping optimizer state load: checkpoint has %d optimizers, "
+                    "current config has %d.",
+                    len(optimizer_states),
+                    len(self.optimizers),
+                )
+            else:
+                for optimizer, optimizer_state in zip(self.optimizers, optimizer_states):
+                    optimizer.load_state_dict(optimizer_state)
+        elif "optimizer" in checkpoint:
+            if len(self.optimizers) != 1:
+                logger.warning(
+                    "Skipping legacy optimizer state load for multi-optimizer config."
+                )
+            else:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
         if "ema" in checkpoint:
             self.ema.load_state_dict(checkpoint["ema"])
         self.start_step = int(checkpoint.get("step", 0))
@@ -194,6 +341,7 @@ class TrainRunner:
             "step": step,
             "model": self.unwrap_model().state_dict(),
             "optimizer": self.optimizer.state_dict(),
+            "optimizers": [optimizer.state_dict() for optimizer in self.optimizers],
             "ema": self.ema.state_dict(),
             "configs": OmegaConf.to_container(self.configs, resolve=True),
         }
@@ -227,7 +375,8 @@ class TrainRunner:
         dataloader_iter = iter(self.dataloader)
         while step < max_steps:
             lr = self.scheduler.step(step)
-            self.optimizer.zero_grad(set_to_none=True)
+            for optimizer in self.optimizers:
+                optimizer.zero_grad(set_to_none=True)
             accumulated_logs: dict[str, torch.Tensor] = {}
 
             for micro_step in range(gradient_accumulation_steps):
@@ -264,12 +413,13 @@ class TrainRunner:
                 with sync_context:
                     self.fabric.backward(loss / gradient_accumulation_steps)
 
-            self.fabric.clip_gradients(
-                self.model,
-                self.optimizer,
-                max_norm=self.configs.training.gradient_clip_norm,
-            )
-            self.optimizer.step()
+            for optimizer in self.optimizers:
+                self.fabric.clip_gradients(
+                    self.model,
+                    optimizer,
+                    max_norm=self.configs.training.gradient_clip_norm,
+                )
+                optimizer.step()
             self.ema.update(self.model)
 
             if step % self.configs.training.log_every_n_steps == 0:
